@@ -1,0 +1,963 @@
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
+import Fastify, { type FastifyInstance } from 'fastify';
+import {
+  APPLICATION_PREFILL_MAX_BYTES,
+  generateApplicationPrefillSample,
+  pdfPageCount,
+  prefillApplicationFromPdf,
+} from './applicationPrefill.js';
+import { summarizeCase } from './ai.js';
+import { resolveGeminiConfig, type GeminiConfig } from './config.js';
+import { generateSyntheticContract } from './contractPdf.js';
+import { buildCorePayload } from './corePayload.js';
+import {
+  analyzeDocumentIntelligence,
+  asCachedInsight,
+  buildLocalDocumentIntelligence,
+  documentIntelligenceFingerprint,
+} from './documentIntelligence.js';
+import { DOCUMENT_PREVIEW_MAX_PAGE, DocumentPreviewCache } from './documentPreview.js';
+import { applyVerifiedPdfEvidence, PdfEvidenceLocator } from './pdfEvidenceLocator.js';
+import { STAGE_LABELS, STATUS_LABELS, STATUS_PROGRESS } from './labels.js';
+import { getPolicyCatalog } from './policyCatalog.js';
+import { allowedActions, evaluateCaseRules } from './rules.js';
+import { JsonStore } from './store.js';
+import { generateSyntheticDocumentPdf } from './syntheticDocumentPdf.js';
+import type {
+  AfpcCase,
+  CaseDetail,
+  CaseDocument,
+  CaseFacts,
+  ClientProfile,
+  ProductProfile,
+} from './types.js';
+import { normalizeAction, transitionCase, WorkflowError } from './workflow.js';
+
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const defaultDataDir = path.resolve(moduleDir, '../data');
+
+export interface BuildAppOptions {
+  dataDir?: string;
+  logger?: boolean;
+  geminiConfig?: GeminiConfig;
+}
+
+interface CaseParams {
+  id: string;
+}
+
+interface DocumentParams extends CaseParams {
+  documentId: string;
+}
+
+interface DocumentPreviewQuery {
+  page?: string;
+}
+
+interface CasesQuery {
+  status?: string;
+  search?: string;
+}
+
+interface ActionBody {
+  action?: unknown;
+  actor?: unknown;
+  note?: unknown;
+  role?: unknown;
+}
+
+interface CaseInput {
+  agency?: string;
+  advisor?: string;
+  assignee?: string;
+  scenario?: string;
+  client?: Partial<ClientProfile> & { idNumber?: string };
+  product?: Partial<ProductProfile>;
+  facts?: Partial<CaseFacts>;
+}
+
+function hoursBetween(start: string, end: Date): number {
+  return Math.max(0, Math.round(((end.getTime() - new Date(start).getTime()) / 3_600_000) * 10) / 10);
+}
+
+function withLiveSla(afpcCase: AfpcCase): AfpcCase {
+  const now = new Date();
+  return {
+    ...afpcCase,
+    statusLabel: STATUS_LABELS[afpcCase.status],
+    currentStage: STAGE_LABELS[afpcCase.status],
+    sla: {
+      ...afpcCase.sla,
+      ageHours: hoursBetween(afpcCase.sla.receivedAt, now),
+      breached: now.getTime() > new Date(afpcCase.sla.dueAt).getTime(),
+    },
+  };
+}
+
+function detail(store: JsonStore, afpcCase: AfpcCase): CaseDetail {
+  const live = withLiveSla(afpcCase);
+  return {
+    ...live,
+    auditTrail: store.listAudit(live.id),
+    canActions: allowedActions(live),
+  };
+}
+
+function ensureCase(store: JsonStore, caseId: string): AfpcCase {
+  const found = store.findCase(caseId);
+  if (!found) throw new WorkflowError(`No se encontró el caso ${caseId}.`, 404);
+  return found;
+}
+
+function textOr(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function safeContribution(value: unknown, fallback: number): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function normalizeFrequency(value: unknown, fallback: string): string {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  const normalized = value.trim().toLocaleLowerCase('es-HN');
+  if (normalized === 'mensual') return 'Mensual';
+  if (['unico', 'único', 'aporte unico', 'aporte único'].includes(normalized)) return 'Aporte único';
+  if (normalized === 'trimestral') return 'Trimestral';
+  return value.trim();
+}
+
+function normalizePaymentMethod(value: unknown, fallback: string): string {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  const normalized = value.trim().toLocaleLowerCase('es-HN');
+  if (['cuenta_occidente', 'débito a cuenta', 'debito a cuenta'].includes(normalized)) {
+    return 'Débito a cuenta';
+  }
+  if (['tarjeta_credito', 'tarjeta de crédito', 'tarjeta de credito'].includes(normalized)) {
+    return 'Tarjeta de crédito';
+  }
+  if (['tarjeta_debito', 'tarjeta de débito', 'tarjeta de debito'].includes(normalized)) {
+    return 'Tarjeta de débito';
+  }
+  if (['transferencia', 'transferencia bancaria'].includes(normalized)) {
+    return 'Transferencia bancaria';
+  }
+  return value.trim();
+}
+
+function maskIdentification(value: unknown, fallback: string): string {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  const compact = value.trim();
+  if (compact.includes('*')) return compact;
+  const visible = compact.replaceAll(/[^0-9A-Za-z]/gu, '').slice(-4) || 'DEMO';
+  return `****-****-${visible}`;
+}
+
+function safeUploadedFilename(filename: string, fallback: string): string {
+  const base = path.basename(filename || fallback);
+  const cleaned = base.replaceAll(/[\r\n"\\/]/gu, '_').trim().slice(0, 160);
+  return cleaned || fallback;
+}
+
+function demoDocumentPackage(caseId: string, createdAt: string): CaseDocument[] {
+  const definitions = [
+    ['AFFILIATION_FORM', 'Formulario de afiliación sintético.pdf', 2, 34],
+    ['IDENTITY', 'Identidad sintética.pdf', 1, 7],
+    ['RTN', 'RTN sintético.pdf', 1, 4],
+    ['CONTRIBUTION_RECEIPT', 'Comprobante de aporte sintético.pdf', 1, 6],
+    ['FINANCIAL_EDUCATION', 'Constancia de educación financiera sintética.pdf', 1, 5],
+    ['FATCA', 'Autocertificación FATCA sintética.pdf', 1, 12],
+    ['CONTRACT', 'Contrato de afiliación sintético.pdf', 8, 9],
+    ['SOURCE_OF_FUNDS', 'Respaldo de procedencia sintético.pdf', 1, 6],
+    ['SCREENING', 'Resultado de listas sintético.pdf', 1, 4],
+    ['EMAIL_CHECKLIST', 'Correo y lista de verificación sintética.pdf', 1, 3],
+  ] as const;
+  return definitions.map(([type, name, pages, fieldsExtracted], index) => ({
+    id: `${caseId}-doc-${index + 1}`,
+    name,
+    type,
+    status: 'VALID',
+    synthetic: true,
+    uploadedAt: createdAt,
+    mimeType: 'application/pdf',
+    pages,
+    confidence: roundDemoConfidence(index),
+    fieldsExtracted,
+  }));
+}
+
+function roundDemoConfidence(index: number): number {
+  return Math.round((0.95 + (index % 4) * 0.01) * 100) / 100;
+}
+
+function mergeCaseInput(current: AfpcCase, input: CaseInput): AfpcCase {
+  const updated: AfpcCase = {
+    ...current,
+    agency: textOr(input.agency, current.agency),
+    advisor: textOr(input.advisor, current.advisor),
+    assignee: textOr(input.assignee, current.assignee),
+    client: { ...current.client, ...(input.client ?? {}) },
+    product: { ...current.product, ...(input.product ?? {}) },
+    facts: { ...current.facts, ...(input.facts ?? {}) },
+    updatedAt: new Date().toISOString(),
+    documentIntelligence: undefined,
+  };
+  updated.product.contributionAmount = safeContribution(
+    updated.product.contributionAmount,
+    current.product.contributionAmount,
+  );
+  updated.product.frequency = normalizeFrequency(
+    input.product?.frequency,
+    current.product.frequency,
+  );
+  updated.product.paymentMethod = normalizePaymentMethod(
+    input.product?.paymentMethod,
+    current.product.paymentMethod,
+  );
+  const evaluation = evaluateCaseRules(updated);
+  return {
+    ...updated,
+    validations: evaluation.validations,
+    risk: evaluation.risk,
+    progress: Math.max(STATUS_PROGRESS[updated.status], evaluation.progress),
+  };
+}
+
+function createCaseInput(store: JsonStore, input: CaseInput): AfpcCase {
+  const number = store.listCases().length + 1;
+  const padded = String(number).padStart(3, '0');
+  const createdAt = new Date().toISOString();
+  const dueAt = new Date(Date.now() + 24 * 3_600_000).toISOString();
+  const caseId = `case-${padded}`;
+  const preparedScenario = ['standard', 'compliance'].includes(input.scenario ?? '');
+  const provisional: AfpcCase = {
+    id: caseId,
+    reference: `AFP-DEMO-${new Date().getFullYear()}-${padded}`,
+    synthetic: true,
+    status: 'EN_REVISION',
+    statusLabel: STATUS_LABELS.EN_REVISION,
+    currentStage: STAGE_LABELS.EN_REVISION,
+    agency: textOr(input.agency, 'Agencia Demo'),
+    advisor: textOr(input.advisor, 'Asesor Demo'),
+    assignee: textOr(input.assignee, 'Control de Calidad Demo'),
+    createdAt,
+    updatedAt: createdAt,
+    client: {
+      fullName: textOr(input.client?.fullName, `Cliente Sintético ${padded}`),
+      idType: input.client?.idType ?? 'DNI',
+      idNumberMasked: maskIdentification(
+        input.client?.idNumberMasked ?? input.client?.idNumber,
+        `DEMO-****-${padded}`,
+      ),
+      birthDate: input.client?.birthDate,
+      nationality: textOr(input.client?.nationality, 'Hondureña'),
+      residenceCountry: textOr(input.client?.residenceCountry, 'Honduras'),
+      city: textOr(input.client?.city, 'Ciudad Demo'),
+      emailMasked: input.client?.emailMasked,
+      phoneMasked: input.client?.phoneMasked,
+    },
+    product: {
+      plan: textOr(input.product?.plan, 'Plan Individual de Pensiones'),
+      currency: input.product?.currency ?? 'HNL',
+      contributionAmount: safeContribution(input.product?.contributionAmount, 500),
+      frequency: normalizeFrequency(input.product?.frequency, 'Mensual'),
+      paymentMethod: normalizePaymentMethod(input.product?.paymentMethod, 'Débito a cuenta'),
+      sourceOfFunds: textOr(input.product?.sourceOfFunds, 'Pendiente de documentar'),
+    },
+    facts: {
+      educationFinancialYear:
+        input.facts?.educationFinancialYear ?? (preparedScenario ? new Date().getFullYear() : undefined),
+      fatcaPositive: input.facts?.fatcaPositive ?? false,
+      addressConsistent: input.facts?.addressConsistent ?? true,
+      sourceOfFundsDocumented: input.facts?.sourceOfFundsDocumented ?? preparedScenario,
+      signaturesComplete: input.facts?.signaturesComplete ?? preparedScenario,
+      beneficiaryPercentTotal: input.facts?.beneficiaryPercentTotal ?? (preparedScenario ? 100 : 0),
+      identityVerified: input.facts?.identityVerified ?? preparedScenario,
+      pepDeclared: input.facts?.pepDeclared ?? false,
+      apnfdDeclared: input.facts?.apnfdDeclared ?? false,
+    },
+    risk: { level: 'BAJO', score: 0, route: 'REVISION_ESTANDAR', reasons: [] },
+    sla: { receivedAt: createdAt, dueAt, ageHours: 0, breached: false },
+    documents: preparedScenario ? demoDocumentPackage(caseId, createdAt) : [],
+    validations: [],
+    progress: STATUS_PROGRESS.EN_REVISION,
+  };
+  const evaluation = evaluateCaseRules(provisional);
+  return {
+    ...provisional,
+    risk: evaluation.risk,
+    validations: evaluation.validations,
+    progress: evaluation.progress,
+  };
+}
+
+function dashboard(store: JsonStore) {
+  const cases = store.listCases().map(withLiveSla);
+  const auditEvents = cases.flatMap((item) => store.listAudit(item.id));
+  const count = (statuses: AfpcCase['status'][]) =>
+    cases.filter((item) => statuses.includes(item.status)).length;
+  const casesWithReprocess = cases.filter(
+    (item) =>
+      ['DEVUELTO', 'CORREGIDO'].includes(item.status) ||
+      auditEvents.some((event) => event.caseId === item.id && ['case-returned', 'demo-correction'].includes(event.action)),
+  ).length;
+  const statusOrder: AfpcCase['status'][] = [
+    'RECIBIDO',
+    'EN_REVISION',
+    'DEVUELTO',
+    'CORREGIDO',
+    'ESCALADO_CUMPLIMIENTO',
+    'APROBADO',
+    'LISTO_CORE',
+    'ARCHIVADO',
+  ];
+  const today = new Date();
+  const daysToShow = 14;
+  const volumeByDay = Array.from({ length: daysToShow }, (_unused, index) => {
+    const day = new Date(today);
+    day.setDate(today.getDate() - (daysToShow - 1 - index));
+    const date = day.toISOString().slice(0, 10);
+    return {
+      date,
+      label: day.toLocaleDateString('es-HN', { day: '2-digit', month: 'short' }).replace('.', ''),
+      count: cases.filter((item) => item.createdAt.slice(0, 10) === date).length,
+    };
+  });
+  const errors = cases.flatMap((item) => item.validations).filter((item) => item.severity === 'error');
+  const warnings = cases.flatMap((item) => item.validations).filter((item) => item.severity === 'warning');
+  const documentCount = cases.reduce((sum, item) => sum + item.documents.length, 0);
+  const extractedFieldCount = cases.reduce(
+    (sum, item) => sum + item.documents.reduce((docSum, document) => docSum + (document.fieldsExtracted ?? 0), 0),
+    0,
+  );
+  const documentIntelligenceSavings = cases.reduce(
+    (sum, item) => sum + (item.documentIntelligence?.metrics.estimatedMinutesSaved ?? 0),
+    0,
+  );
+  const estimatedMinutesSaved = documentIntelligenceSavings ||
+    Math.max(0, documentCount * 3.5 + extractedFieldCount * 0.5 + auditEvents.filter((event) => event.action === 'application-prefill').length * 18);
+
+  return {
+    synthetic: true,
+    dataNotice: 'Indicadores calculados desde los expedientes cargados en el portal local.',
+    metrics: {
+      total: cases.length,
+      inReview: count(['RECIBIDO', 'EN_REVISION', 'CORREGIDO']),
+      returned: count(['DEVUELTO']),
+      compliance: count(['ESCALADO_CUMPLIMIENTO']),
+      readyForCore: count(['APROBADO', 'LISTO_CORE']),
+      reprocessRate: cases.length ? Math.round((casesWithReprocess / cases.length) * 1000) / 10 : 0,
+      avgCycleHours: cases.length
+        ? Math.round((cases.reduce((sum, item) => sum + item.sla.ageHours, 0) / cases.length) * 10) / 10
+        : 0,
+      estimatedHoursSaved: Math.round((estimatedMinutesSaved / 60) * 10) / 10,
+    },
+    byStatus: statusOrder.map((status) => ({
+      status,
+      label: STATUS_LABELS[status],
+      count: count([status]),
+    })),
+    volumeByDay,
+    recentCases: cases
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, 5),
+    alerts: [
+      { level: 'error', message: 'Validaciones obligatorias pendientes', count: errors.length },
+      { level: 'warning', message: 'Alertas que requieren revisión humana', count: warnings.length },
+      { level: 'PLAZO', message: 'Casos fuera del plazo de atención de la demostración', count: cases.filter((item) => item.sla.breached).length },
+    ],
+  };
+}
+
+export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
+  const app = Fastify({ logger: options.logger ?? false });
+  const store = new JsonStore(options.dataDir ?? defaultDataDir);
+  const documentPreviewCache = new DocumentPreviewCache({
+    cacheDir: path.join(store.dataDir, 'preview-cache'),
+  });
+  const pdfEvidenceLocator = new PdfEvidenceLocator();
+  const geminiConfig = options.geminiConfig ?? resolveGeminiConfig();
+  await store.initialize();
+
+  await app.register(cors, {
+    origin: true,
+    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+  });
+  await app.register(multipart, {
+    limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 8 },
+  });
+
+  app.setErrorHandler((error, _request, reply) => {
+    const genericError = error as { statusCode?: unknown; message?: unknown };
+    const statusCode =
+      error instanceof WorkflowError
+        ? error.statusCode
+        : typeof genericError.statusCode === 'number'
+          ? genericError.statusCode
+          : 500;
+    if (statusCode >= 500) app.log.error(error);
+    reply.status(statusCode).send({
+      error:
+        statusCode === 404
+          ? 'No encontrado'
+          : statusCode >= 500
+            ? 'Error interno del servidor'
+            : 'Solicitud no válida',
+      message:
+        statusCode >= 500
+          ? 'Ocurrió un error interno en el demo local.'
+          : typeof genericError.message === 'string'
+            ? genericError.message
+            : 'La solicitud no es válida.',
+      statusCode,
+    });
+  });
+
+  app.get('/api/health', async () => ({
+    status: 'ok',
+    service: 'afpc-occidente-demo-api',
+    mode: 'demo-local',
+    timestamp: new Date().toISOString(),
+    geminiConfigured: geminiConfig.configured,
+  }));
+
+  app.get('/api/dashboard', async () => dashboard(store));
+
+  app.get('/api/policies', async () => getPolicyCatalog());
+
+  app.get('/api/demo/application-prefill-sample', async (_request, reply) => {
+    const pdf = await generateApplicationPrefillSample();
+    reply
+      .header('content-type', 'application/pdf')
+      .header(
+        'content-disposition',
+        'attachment; filename="solicitud-afpc-sintetica-demo.pdf"',
+      )
+      .header('content-length', pdf.length)
+      .header('cache-control', 'no-store')
+      .header('x-document-origin', 'generated-synthetic');
+    return reply.send(pdf);
+  });
+
+  app.post('/api/application-prefill', async (request, reply) => {
+    let fileBuffer: Buffer | undefined;
+    let filename = 'solicitud-sintetica.pdf';
+    let mimeType = '';
+    let synthetic = false;
+    let allowAiProcessing = false;
+
+    try {
+      for await (const part of request.parts({
+        limits: { fileSize: APPLICATION_PREFILL_MAX_BYTES, files: 1, fields: 4 },
+      })) {
+        if (part.type === 'file') {
+          if (fileBuffer) throw new WorkflowError('Solo se admite un PDF por solicitud.', 400);
+          mimeType = part.mimetype;
+          filename = part.filename;
+          fileBuffer = await part.toBuffer();
+          if (part.file.truncated) {
+            throw new WorkflowError('El PDF supera el límite de 8 MB.', 413);
+          }
+        } else if (part.fieldname === 'synthetic') {
+          synthetic = String(part.value).trim().toLowerCase() === 'true';
+        } else if (part.fieldname === 'allowAiProcessing') {
+          allowAiProcessing = String(part.value).trim().toLowerCase() === 'true';
+        }
+      }
+    } catch (error) {
+      const uploadError = error as { statusCode?: unknown; code?: unknown };
+      if (
+        uploadError.statusCode === 413 ||
+        uploadError.code === 'FST_REQ_FILE_TOO_LARGE'
+      ) {
+        throw new WorkflowError('El PDF supera el límite de 8 MB.', 413);
+      }
+      throw error;
+    }
+
+    if (!synthetic) {
+      throw new WorkflowError(
+        'Esta demostración solo procesa solicitudes declaradas explícitamente como sintéticas.',
+        400,
+      );
+    }
+    if (!fileBuffer?.length) throw new WorkflowError('Debe adjuntar un PDF de la solicitud.', 400);
+    if (mimeType !== 'application/pdf') {
+      throw new WorkflowError('Formato no permitido. Adjunte un archivo PDF.', 415);
+    }
+    if (fileBuffer.subarray(0, 5).toString('ascii') !== '%PDF-') {
+      throw new WorkflowError('El archivo adjunto no contiene una firma PDF válida.', 415);
+    }
+    const pdfSource = fileBuffer.toString('latin1');
+    if (!pdfSource.slice(-2_048).includes('%%EOF')) {
+      throw new WorkflowError('El PDF está incompleto o dañado.', 415);
+    }
+    if (/\/Encrypt\b/u.test(pdfSource)) {
+      throw new WorkflowError('No se admiten PDF cifrados o protegidos con contraseña.', 415);
+    }
+    if (!/\/Type\s*\/Page\b/u.test(pdfSource)) {
+      throw new WorkflowError('El PDF no contiene páginas reconocibles.', 415);
+    }
+    const pages = pdfPageCount(fileBuffer);
+    if (pages > 20) {
+      throw new WorkflowError('La solicitud no puede superar 20 páginas.', 413);
+    }
+
+    const result = await prefillApplicationFromPdf(
+      { buffer: fileBuffer, filename },
+      geminiConfig,
+      allowAiProcessing,
+    );
+    reply.header('cache-control', 'no-store');
+    return result;
+  });
+
+  app.get<{ Querystring: CasesQuery }>('/api/cases', async (request) => {
+    const status = request.query.status?.trim().toUpperCase();
+    const search = request.query.search?.trim().toLocaleLowerCase('es-HN');
+    const items = store
+      .listCases()
+      .map(withLiveSla)
+      .filter((item) => !status || item.status === status)
+      .filter((item) => {
+        if (!search) return true;
+        return [
+          item.reference,
+          item.client.fullName,
+          item.client.idNumberMasked,
+          item.agency,
+          item.advisor,
+        ].some((value) => value.toLocaleLowerCase('es-HN').includes(search));
+      })
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return { items, total: items.length };
+  });
+
+  app.get<{ Params: CaseParams }>('/api/cases/:id', async (request) =>
+    detail(store, ensureCase(store, request.params.id)),
+  );
+
+  app.post<{ Body: CaseInput }>('/api/cases', async (request, reply) => {
+    const created = createCaseInput(store, request.body ?? {});
+    await store.saveCaseAndAudit(created, {
+      caseId: created.id,
+      action: 'created',
+      label: 'Caso sintético creado',
+      actor: created.advisor,
+      toStatus: created.status,
+    });
+    reply.status(201);
+    return detail(store, created);
+  });
+
+  app.patch<{ Params: CaseParams; Body: CaseInput }>('/api/cases/:id', async (request) => {
+    const current = ensureCase(store, request.params.id);
+    const updated = mergeCaseInput(current, request.body ?? {});
+    await store.saveCaseAndAudit(updated, {
+      caseId: updated.id,
+      action: 'updated',
+      label: 'Datos sintéticos del expediente actualizados',
+      actor: 'Usuario Demo',
+      fromStatus: current.status,
+      toStatus: updated.status,
+    });
+    return detail(store, updated);
+  });
+
+  app.post<{ Params: CaseParams; Body: ActionBody }>(
+    '/api/cases/:id/actions',
+    async (request) => {
+      const current = ensureCase(store, request.params.id);
+      const action = normalizeAction(request.body?.action);
+      const actor = textOr(request.body?.actor, 'Usuario Demo');
+      const note = typeof request.body?.note === 'string' ? request.body.note.trim() : undefined;
+      const role = typeof request.body?.role === 'string' ? request.body.role.trim() : undefined;
+      const transition = transitionCase(current, action, { role, note });
+      const auditEvent = await store.saveCaseAndAudit(transition.afpcCase, {
+        caseId: current.id,
+        action,
+        label: transition.label,
+        actor,
+        note,
+        fromStatus: current.status,
+        toStatus: transition.afpcCase.status,
+      });
+      return { case: detail(store, transition.afpcCase), auditEvent };
+    },
+  );
+
+  app.post<{ Params: CaseParams }>('/api/cases/:id/revalidate', async (request) => {
+    const current = ensureCase(store, request.params.id);
+    const evaluation = evaluateCaseRules(current);
+    const updated: AfpcCase = {
+      ...current,
+      validations: evaluation.validations,
+      risk: evaluation.risk,
+      progress: Math.max(STATUS_PROGRESS[current.status], evaluation.progress),
+      updatedAt: new Date().toISOString(),
+      documentIntelligence: undefined,
+    };
+    await store.saveCaseAndAudit(updated, {
+      caseId: current.id,
+      action: 'rules-executed',
+      label: 'Reglas de control ejecutadas nuevamente',
+      actor: 'Motor de reglas',
+      note: `${evaluation.summary.errors} error(es), ${evaluation.summary.warnings} alerta(s).`,
+      fromStatus: current.status,
+      toStatus: updated.status,
+    });
+    return { case: detail(store, updated), summary: evaluation.summary };
+  });
+
+  app.post<{ Params: CaseParams }>('/api/cases/:id/demo-correction', async (request) => {
+    const current = ensureCase(store, request.params.id);
+    const documents = current.documents.map((document) =>
+      document.type === 'FINANCIAL_EDUCATION'
+        ? { ...document, status: 'VALID' as const, uploadedAt: new Date().toISOString() }
+        : document,
+    );
+    const corrected: AfpcCase = {
+      ...current,
+      status: 'CORREGIDO',
+      statusLabel: STATUS_LABELS.CORREGIDO,
+      currentStage: STAGE_LABELS.CORREGIDO,
+      facts: { ...current.facts, educationFinancialYear: new Date().getFullYear() },
+      documents,
+      updatedAt: new Date().toISOString(),
+      documentIntelligence: undefined,
+    };
+    const evaluation = evaluateCaseRules(corrected);
+    corrected.validations = evaluation.validations;
+    corrected.risk = evaluation.risk;
+    corrected.progress = Math.max(STATUS_PROGRESS.CORREGIDO, evaluation.progress);
+    await store.saveCaseAndAudit(corrected, {
+      caseId: current.id,
+      action: 'demo-correction',
+      label: 'Año de educación financiera corregido',
+      actor: 'Asesor Demo',
+      note: 'Corrección sintética aplicada para recorrer el flujo del demo.',
+      fromStatus: current.status,
+      toStatus: corrected.status,
+    });
+    return { case: detail(store, corrected), summary: evaluation.summary };
+  });
+
+  app.get<{ Params: CaseParams }>('/api/cases/:id/core-payload', async (request) =>
+    buildCorePayload(withLiveSla(ensureCase(store, request.params.id))),
+  );
+
+  app.get<{ Params: CaseParams }>('/api/cases/:id/contract', async (request, reply) => {
+    const afpcCase = ensureCase(store, request.params.id);
+    const pdf = await generateSyntheticContract(afpcCase);
+    reply
+      .header('content-type', 'application/pdf')
+      .header('content-disposition', `inline; filename="contrato-${afpcCase.reference}.pdf"`)
+      .header('cache-control', 'no-store');
+    return reply.send(pdf);
+  });
+
+  app.get<{ Params: DocumentParams }>(
+    '/api/cases/:id/documents/:documentId/content',
+    async (request, reply) => {
+      const afpcCase = ensureCase(store, request.params.id);
+      const sourceDocument = afpcCase.documents.find(
+        (document) => document.id === request.params.documentId,
+      );
+      if (!sourceDocument) {
+        throw new WorkflowError(`No se encontró el documento ${request.params.documentId}.`, 404);
+      }
+      let content: Buffer;
+      let mimeType = 'application/pdf';
+      if (sourceDocument.storageKey) {
+        const uploadsRoot = path.resolve(store.uploadsDir);
+        const resolvedPath = path.resolve(store.uploadsDir, sourceDocument.storageKey);
+        if (!resolvedPath.startsWith(`${uploadsRoot}${path.sep}`)) {
+          throw new WorkflowError('La referencia de almacenamiento no es válida.', 400);
+        }
+        content = await readFile(resolvedPath);
+        mimeType = sourceDocument.mimeType ?? 'application/octet-stream';
+      } else {
+        content = await generateSyntheticDocumentPdf(afpcCase, sourceDocument);
+      }
+      const extension = mimeType === 'application/pdf' ? 'pdf' : mimeType === 'image/png' ? 'png' : mimeType === 'image/jpeg' ? 'jpg' : 'bin';
+      reply
+        .header('content-type', mimeType)
+        .header(
+          'content-disposition',
+          `inline; filename="${sourceDocument.type.toLowerCase()}-${afpcCase.reference}.${extension}"`,
+        )
+        .header('cache-control', 'no-store')
+        .header('x-document-origin', sourceDocument.storageKey ? 'uploaded-synthetic' : 'generated-synthetic');
+      return reply.send(content);
+    },
+  );
+
+  app.get<{ Params: DocumentParams; Querystring: DocumentPreviewQuery }>(
+    '/api/cases/:id/documents/:documentId/preview',
+    async (request, reply) => {
+      const afpcCase = ensureCase(store, request.params.id);
+      const sourceDocument = afpcCase.documents.find(
+        (document) => document.id === request.params.documentId,
+      );
+      if (!sourceDocument?.storageKey) {
+        throw new WorkflowError('La vista original solo está disponible para archivos cargados.', 404);
+      }
+      const uploadsRoot = path.resolve(store.uploadsDir);
+      const resolvedPath = path.resolve(store.uploadsDir, sourceDocument.storageKey);
+      if (!resolvedPath.startsWith(`${uploadsRoot}${path.sep}`)) {
+        throw new WorkflowError('La referencia de almacenamiento no es válida.', 400);
+      }
+      const mimeType = sourceDocument.mimeType ?? 'application/octet-stream';
+      if (mimeType === 'image/png' || mimeType === 'image/jpeg') {
+        reply.header('content-type', mimeType).header('cache-control', 'private, max-age=3600');
+        return reply.send(await readFile(resolvedPath));
+      }
+      if (mimeType !== 'application/pdf') {
+        throw new WorkflowError('Este formato no dispone de vista previa visual.', 415);
+      }
+      const requestedPage = Number(request.query.page ?? '1');
+      const availablePages = Math.min(
+        sourceDocument.pages ?? DOCUMENT_PREVIEW_MAX_PAGE,
+        DOCUMENT_PREVIEW_MAX_PAGE,
+      );
+      if (!Number.isInteger(requestedPage) || requestedPage < 1 || requestedPage > availablePages) {
+        throw new WorkflowError(
+          `La página solicitada debe estar entre 1 y ${availablePages}.`,
+          400,
+        );
+      }
+      try {
+        const preview = await documentPreviewCache.get(
+          resolvedPath,
+          sourceDocument.storageKey,
+          requestedPage,
+        );
+        reply
+          .header('content-type', 'image/png')
+          .header('content-length', String(preview.buffer.length))
+          .header('cache-control', 'private, max-age=3600, must-revalidate')
+          .header('etag', preview.etag)
+          .header('x-preview-cache', preview.cacheStatus);
+        if (request.headers['if-none-match'] === preview.etag) {
+          return reply.status(304).send();
+        }
+        return reply.send(preview.buffer);
+      } catch (error) {
+        app.log.warn({ error, documentId: sourceDocument.id }, 'No se pudo generar la vista previa local');
+        throw new WorkflowError(
+          'No fue posible generar esta vista previa. Verifique que el PDF no esté dañado o protegido.',
+          422,
+        );
+      }
+    },
+  );
+
+  app.post<{ Params: CaseParams }>('/api/cases/:id/ai-summary', async (request) => {
+    const current = ensureCase(store, request.params.id);
+    const aiSummary = await summarizeCase(current, geminiConfig);
+    const updated = { ...current, aiSummary, updatedAt: new Date().toISOString() };
+    await store.saveCaseAndAudit(updated, {
+      caseId: current.id,
+      action: 'ai-summary',
+      label: 'Resumen asistido generado',
+      actor: aiSummary.provider === 'gemini' ? 'Gemini' : 'Resumen local',
+      note: 'El resumen no constituye aprobación ni decisión automática.',
+      fromStatus: current.status,
+      toStatus: updated.status,
+    });
+    return aiSummary;
+  });
+
+  app.get<{ Params: CaseParams }>('/api/cases/:id/ai-insights', async (request, reply) => {
+    const current = ensureCase(store, request.params.id);
+    const fingerprint = documentIntelligenceFingerprint(current);
+    if (current.documentIntelligence?.analysis.fingerprint === fingerprint) {
+      reply.header('x-ai-cache', 'hit');
+      return asCachedInsight(current.documentIntelligence);
+    }
+    reply.header('x-ai-cache', 'miss');
+    return applyVerifiedPdfEvidence(
+      buildLocalDocumentIntelligence(current, geminiConfig.configured),
+      current,
+      store.uploadsDir,
+      pdfEvidenceLocator,
+    );
+  });
+
+  const persistDocumentInsights = async (caseId: string) => {
+    const current = ensureCase(store, caseId);
+    const fingerprint = documentIntelligenceFingerprint(current);
+    if (current.documentIntelligence?.analysis.fingerprint === fingerprint) {
+      return asCachedInsight(current.documentIntelligence);
+    }
+    const insight = await applyVerifiedPdfEvidence(
+      await analyzeDocumentIntelligence(current, geminiConfig),
+      current,
+      store.uploadsDir,
+      pdfEvidenceLocator,
+    );
+    insight.analysis.generatedAt = new Date().toISOString();
+    const updated: AfpcCase = {
+      ...current,
+      documentIntelligence: insight,
+      updatedAt: new Date().toISOString(),
+    };
+    await store.saveCaseAndAudit(updated, {
+      caseId: current.id,
+      action: 'document-intelligence',
+      label: 'Análisis documental inteligente generado',
+      actor: insight.analysis.provider === 'gemini' ? 'Gemini + motor determinístico' : 'Motor determinístico local',
+      note: `${insight.metrics.documentsProcessed} documentos, ${insight.metrics.fieldsExtracted} campos, ${insight.metrics.anomaliesDetected} ${insight.metrics.anomaliesDetected === 1 ? 'anomalía' : 'anomalías'}. Modo de demostración sintético.`,
+      fromStatus: current.status,
+      toStatus: updated.status,
+    });
+    return insight;
+  };
+
+  app.post<{ Params: CaseParams }>('/api/cases/:id/ai-insights', async (request, reply) => {
+    const insight = await persistDocumentInsights(request.params.id);
+    reply.header('x-ai-cache', insight.analysis.cached ? 'hit' : 'miss');
+    return insight;
+  });
+
+  app.post<{ Params: CaseParams }>(
+    '/api/cases/:id/ai-insights/reanalyze',
+    async (request, reply) => {
+      const insight = await persistDocumentInsights(request.params.id);
+      reply.header('x-ai-cache', insight.analysis.cached ? 'hit' : 'miss');
+      return insight;
+    },
+  );
+
+  app.post<{ Params: CaseParams }>('/api/cases/:id/documents', async (request, reply) => {
+    const current = ensureCase(store, request.params.id);
+    let fileBuffer: Buffer | undefined;
+    let mimeType = '';
+    let type = 'OTHER';
+    let synthetic = false;
+    let originalFilename = 'documento-demo';
+
+    for await (const part of request.parts()) {
+      if (part.type === 'file') {
+        if (fileBuffer) throw new WorkflowError('Solo se admite un archivo por solicitud.', 400);
+        mimeType = part.mimetype;
+        originalFilename = part.filename;
+        fileBuffer = await part.toBuffer();
+        if (part.file.truncated) throw new WorkflowError('El archivo supera el límite de 10 MB.', 413);
+      } else if (part.fieldname === 'type') {
+        type = String(part.value).trim().toUpperCase().replaceAll(/[^A-Z0-9_]/gu, '_');
+      } else if (part.fieldname === 'synthetic') {
+        synthetic = String(part.value).trim().toLowerCase() === 'true';
+      }
+    }
+
+    if (!synthetic) {
+      throw new WorkflowError(
+        'Este demo solo acepta documentos declarados explícitamente como sintéticos.',
+        400,
+      );
+    }
+    if (!fileBuffer) throw new WorkflowError('Debe adjuntar un archivo.', 400);
+    const allowedMimeTypes = new Set([
+      'application/pdf',
+      'image/png',
+      'image/jpeg',
+      'text/plain',
+    ]);
+    if (!allowedMimeTypes.has(mimeType)) {
+      throw new WorkflowError('Formato no permitido. Use PDF, PNG, JPG o TXT.', 415);
+    }
+
+    const signatures: Record<string, boolean> = {
+      'application/pdf': fileBuffer.subarray(0, 5).toString('ascii') === '%PDF-',
+      'image/png': fileBuffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+      'image/jpeg': fileBuffer[0] === 0xff && fileBuffer[1] === 0xd8,
+      'text/plain': true,
+    };
+    if (!signatures[mimeType]) {
+      throw new WorkflowError('El contenido del archivo no coincide con el formato declarado.', 415);
+    }
+
+    const extension: Record<string, string> = {
+      'application/pdf': '.pdf',
+      'image/png': '.png',
+      'image/jpeg': '.jpg',
+      'text/plain': '.txt',
+    };
+    const documentId = randomUUID();
+    const caseUploadDir = path.join(store.uploadsDir, current.id);
+    await mkdir(caseUploadDir, { recursive: true });
+    const storageKey = path.join(current.id, `${documentId}${extension[mimeType]}`);
+    const storedPath = path.join(store.uploadsDir, storageKey);
+    await writeFile(storedPath, fileBuffer);
+    const document: CaseDocument = {
+      id: documentId,
+      name: safeUploadedFilename(originalFilename, `Documento demo ${type}${extension[mimeType]}`),
+      type,
+      status: 'UPLOADED',
+      synthetic: true,
+      uploadedAt: new Date().toISOString(),
+      mimeType,
+      size: fileBuffer.length,
+      storageKey,
+      pages: mimeType === 'application/pdf' ? pdfPageCount(fileBuffer) : 1,
+    };
+    if (mimeType === 'application/pdf') {
+      void documentPreviewCache
+        .get(storedPath, storageKey, 1)
+        .catch((error) => app.log.warn({ error, documentId }, 'No se pudo anticipar la vista previa local'));
+    }
+    let replacedTemplate = false;
+    const mutation = await store.mutateCaseAndAudit(
+      current.id,
+      (latest) => {
+        const replaceableDocument = latest.documents.find(
+          (item) => item.type === type && item.synthetic && !item.storageKey,
+        );
+        replacedTemplate = Boolean(replaceableDocument);
+        const documents = replaceableDocument
+          ? latest.documents.map((item) => (item.id === replaceableDocument.id ? document : item))
+          : [...latest.documents, document];
+        const updated: AfpcCase = {
+          ...latest,
+          documents,
+          updatedAt: new Date().toISOString(),
+          documentIntelligence: undefined,
+        };
+        const evaluation = evaluateCaseRules(updated);
+        updated.validations = evaluation.validations;
+        updated.risk = evaluation.risk;
+        updated.progress = Math.max(STATUS_PROGRESS[updated.status], evaluation.progress);
+        return updated;
+      },
+      (latest, updated) => ({
+        caseId: latest.id,
+        action: 'document-uploaded',
+        label: 'Documento cargado',
+        actor: 'Usuario Demo',
+        note: replacedTemplate
+          ? `Tipo documental: ${type}. Se sustituyó la plantilla de demostración por el archivo cargado.`
+          : `Tipo documental: ${type}.`,
+        fromStatus: latest.status,
+        toStatus: updated.status,
+      }),
+    );
+    const updated = mutation.afpcCase;
+    reply.status(201);
+    return { case: detail(store, updated), document };
+  });
+
+  app.post('/api/demo/reset', async () => {
+    await store.reset();
+    await documentPreviewCache.clear();
+    pdfEvidenceLocator.clear();
+    return { ok: true, message: 'Datos sintéticos restaurados.', dashboard: dashboard(store) };
+  });
+
+  return app;
+}

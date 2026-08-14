@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+server/data/uploads/
+server/data/preview-cache/
+server/data/demo-db.json
+output/
+tmp/
+coverage/

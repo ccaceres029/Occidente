@@ -1,0 +1,18 @@
+{
+  "name": "dmo-bank-occi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Demo local de automatizacion de afiliaciones AFPC Occidente",
+  "packageManager": "pnpm@11.16.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @occi/server --filter @occi/client dev",
+    "build": "pnpm --filter @occi/server build && pnpm --filter @occi/client build",
+    "build:site": "node scripts/build-site.mjs",
+    "test": "pnpm --filter @occi/server test && pnpm --filter @occi/client test",
+    "start": "pnpm --filter @occi/server start"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.0",
+    "execa": "^9.6.0"
+  }
+}
