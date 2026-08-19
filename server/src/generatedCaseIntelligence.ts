@@ -13,7 +13,7 @@ import type {
   SourceOfFundsInsight,
 } from './types.js';
 
-export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.1.0';
+export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.2.0';
 
 export interface GeneratedIntelligenceDocument {
   id: string;
@@ -850,7 +850,7 @@ export function buildGeneratedCaseIntelligence(
         mode: 'generated-case-document-pipeline',
         dataOrigin: 'private-s3-case-documents',
         extractionMethod: 'gemini-multimodal-document-extraction',
-        notOcrNotice: 'Los valores y páginas provienen del análisis multimodal de los archivos privados del caso.',
+        notOcrNotice: 'Los valores y páginas provienen del análisis multimodal; el marco se muestra únicamente cuando la ubicación fue verificada en el PDF.',
         confidenceNotice: 'La confianza mide certeza de extracción; no equivale a autenticidad, cumplimiento ni aprobación.',
       },
       pipeline: [

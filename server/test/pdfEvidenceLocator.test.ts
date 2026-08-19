@@ -7,6 +7,7 @@ import PDFDocument from 'pdfkit';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import {
+  applyVerifiedBufferedPdfEvidence,
   applyVerifiedPdfEvidence,
   parsePdftotextBoundingBoxes,
   PdfEvidenceLocator,
@@ -103,6 +104,46 @@ describe('ubicación local de evidencia PDF', () => {
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }
+  });
+
+  test('ubica respuestas booleanas usando la evidencia textual de la fila', async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), 'occi-evidence-boolean-test-'));
+    const pdfPath = path.join(dataDir, 'fatca.pdf');
+    await writeFile(pdfPath, await createPdf(['Es RESIDENTE de los EE.UU. X']));
+    const source = createSeedDatabase().cases.find((item) => item.id === 'case-001');
+    assert.ok(source);
+    const baseField = buildLocalDocumentIntelligence(source).extractedFields[0];
+    assert.ok(baseField);
+    try {
+      const locations = await new PdfEvidenceLocator().locate(pdfPath, [{
+        ...baseField,
+        id: 'field-fatca-resident',
+        field: 'fatcaResidentUs',
+        label: 'Residencia en EE. UU.',
+        value: true,
+        evidence: 'Es RESIDENTE de los EE.UU. (X)',
+      }]);
+      assert.ok(locations.get('field-fatca-resident')?.boundingBox);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  test('aplica coordenadas verificadas a documentos recibidos como buffers', async () => {
+    const source = createSeedDatabase().cases.find((item) => item.id === 'case-001');
+    assert.ok(source);
+    const insight = buildLocalDocumentIntelligence(source);
+    const field = insight.extractedFields.find((item) => item.field === 'fullName');
+    assert.ok(field);
+    const pdf = await createPdf([`${field.label}: ${String(field.value)}`]);
+    const located = await applyVerifiedBufferedPdfEvidence(insight, [{
+      id: field.documentId,
+      contentType: 'application/pdf',
+      content: pdf,
+    }]);
+    const verified = located.extractedFields.find((item) => item.id === field.id);
+    assert.equal(verified?.evidenceLocation, 'verified-pdf-text');
+    assert.ok(verified?.boundingBox);
   });
 
   test('activa OCR únicamente cuando el PDF no contiene palabras seleccionables', async () => {

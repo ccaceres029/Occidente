@@ -719,6 +719,54 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     },
   );
 
+  app.get<{ Params: GeneratedDocumentParams; Querystring: DocumentPreviewQuery }>(
+    '/api/generated-cases/:id/documents/:documentId/preview',
+    async (request, reply) => {
+      if (!mailService) throw new WorkflowError('Los documentos requieren la conexión MySQL.', 503);
+      const requestedPage = Number(request.query.page ?? '1');
+      if (!Number.isInteger(requestedPage) || requestedPage < 1 || requestedPage > DOCUMENT_PREVIEW_MAX_PAGE) {
+        throw new WorkflowError(
+          `La página solicitada debe estar entre 1 y ${DOCUMENT_PREVIEW_MAX_PAGE}.`,
+          400,
+        );
+      }
+      try {
+        const result = await mailService.getGeneratedDocument(request.params.id, request.params.documentId);
+        if (!result) throw new WorkflowError('No se encontró el documento del caso.', 404);
+        if (result.document.contentType === 'image/png' || result.document.contentType === 'image/jpeg') {
+          if (requestedPage !== 1) throw new WorkflowError('Las imágenes solo disponen de una página.', 400);
+          return reply
+            .header('content-type', result.document.contentType)
+            .header('cache-control', 'private, max-age=3600')
+            .send(result.content);
+        }
+        if (result.document.contentType !== 'application/pdf') {
+          throw new WorkflowError('Este formato no dispone de vista previa visual.', 415);
+        }
+        const preview = await documentPreviewCache.getBuffer(
+          result.content,
+          `generated/${request.params.id}/${result.document.checksumSha256}`,
+          requestedPage,
+        );
+        reply
+          .header('content-type', 'image/png')
+          .header('content-length', String(preview.buffer.length))
+          .header('cache-control', 'private, max-age=3600, must-revalidate')
+          .header('etag', preview.etag)
+          .header('x-preview-cache', preview.cacheStatus);
+        if (request.headers['if-none-match'] === preview.etag) return reply.status(304).send();
+        return reply.send(preview.buffer);
+      } catch (error) {
+        if (error instanceof WorkflowError) throw error;
+        app.log.warn({ error, documentId: request.params.documentId }, 'No se pudo generar la vista previa desde S3');
+        throw new WorkflowError(
+          'No fue posible generar esta vista previa. Verifique que el PDF no esté dañado o protegido.',
+          422,
+        );
+      }
+    },
+  );
+
   app.delete<{ Params: CaseParams }>('/api/generated-cases/:id', async (request) => {
     const actor = requireAdmin(request);
     if (!mailService) throw new WorkflowError('Los casos generados requieren la conexión MySQL.', 503);

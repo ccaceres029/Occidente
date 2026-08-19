@@ -71,4 +71,27 @@ describe('caché local de vistas previas', () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+
+  test('renderiza y reutiliza documentos recibidos directamente desde S3', async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), 'occi-preview-buffer-test-'));
+    let renderCount = 0;
+    const cache = new DocumentPreviewCache({
+      cacheDir: path.join(dataDir, 'cache'),
+      renderer: async () => {
+        renderCount += 1;
+        return validPng;
+      },
+    });
+    const pdf = Buffer.from('%PDF-1.4\ncontenido-s3\n%%EOF\n');
+    try {
+      const first = await cache.getBuffer(pdf, 'generated/case-001/checksum', 1);
+      const second = await cache.getBuffer(pdf, 'generated/case-001/checksum', 1);
+      assert.equal(first.cacheStatus, 'miss');
+      assert.equal(second.cacheStatus, 'hit');
+      assert.equal(first.etag, second.etag);
+      assert.equal(renderCount, 1);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
 });

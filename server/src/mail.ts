@@ -21,6 +21,7 @@ import {
   generatedCaseIntelligenceFingerprint,
 } from './generatedCaseIntelligence.js';
 import { ObjectStorage } from './objectStorage.js';
+import { applyVerifiedBufferedPdfEvidence } from './pdfEvidenceLocator.js';
 import type { DocumentIntelligenceInsight, RiskAssessment } from './types.js';
 
 export interface MailSettings {
@@ -721,6 +722,7 @@ export class MailService {
         content: await this.objectStorage!.getObject(document.s3_key),
       })));
       const result = await analyzeGeneratedCaseIntelligence(id, documents, this.geminiConfig);
+      result.insight = await applyVerifiedBufferedPdfEvidence(result.insight, documents);
       await this.pool.query(
         `UPDATE generated_case_intelligence SET status='COMPLETE', provider='gemini', model=?,
            fingerprint=?, engine_version=?, risk_level=?, risk_score=?, risk_route=?,

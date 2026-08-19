@@ -7,18 +7,21 @@ import {
   Check,
   CheckCircle2,
   CircleGauge,
+  Eye,
   ExternalLink,
   FileSearch,
   Files,
   GitCompareArrows,
   LocateFixed,
   RefreshCw,
+  ScanLine,
   ShieldCheck,
   Sparkles,
   Target,
   XCircle,
 } from 'lucide-react';
 import { api } from '../api';
+import { verifiedEvidenceBoxStyle } from '../evidenceLocation';
 import type { AiConsistencyCheck, GeneratedCaseDetail } from '../types';
 import { documentTypeLabel, formatCurrency, formatEvidenceValue } from '../utils';
 import { Badge, Button } from './ui';
@@ -43,6 +46,9 @@ export default function GeneratedCaseIntelligencePanel({
   const insights = detail.documentIntelligence;
   const [filter, setFilter] = useState<FieldFilter>('all');
   const [selectedFieldId, setSelectedFieldId] = useState('');
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const [previewReady, setPreviewReady] = useState(false);
+  const [previewAspectRatio, setPreviewAspectRatio] = useState<number | null>(null);
 
   useEffect(() => {
     if (insights?.extractedFields.length && !insights.extractedFields.some((field) => field.id === selectedFieldId)) {
@@ -59,8 +65,19 @@ export default function GeneratedCaseIntelligencePanel({
   const selectedField = insights?.extractedFields.find((field) => field.id === selectedFieldId) || insights?.extractedFields[0];
   const selectedDocument = detail.documents.find((document) => document.id === selectedField?.documentId);
   const selectedUrl = selectedDocument ? `${api.generatedDocumentUrl(detail.id, selectedDocument.id)}#page=${selectedField?.page || 1}` : '';
+  const previewUrl = selectedDocument
+    ? api.generatedDocumentPreviewUrl(detail.id, selectedDocument.id, selectedField?.page || 1)
+    : '';
+  const verifiedBoxStyle = useMemo(() => verifiedEvidenceBoxStyle(selectedField), [selectedField]);
+  const visualSource = Boolean(selectedDocument && ['application/pdf', 'image/png', 'image/jpeg'].includes(selectedDocument.contentType));
   const consistencyMatches = insights?.consistency.filter((item) => item.verdict === 'MATCH').length || 0;
   const consistencyReview = (insights?.consistency.length || 0) - consistencyMatches;
+
+  useEffect(() => {
+    setPreviewFailed(false);
+    setPreviewReady(false);
+    setPreviewAspectRatio(null);
+  }, [selectedField?.documentId, selectedField?.page]);
 
   if (detail.documentAnalysis?.missingCount) {
     return (
@@ -135,13 +152,43 @@ export default function GeneratedCaseIntelligencePanel({
           <div className="extracted-field-list">
             {fields.map((field) => {
               const review = percent(field.confidence) < 90 || field.status.toUpperCase() !== 'EXTRACTED';
-              return <button type="button" className={`${field.id === selectedField?.id ? 'is-selected' : ''} ${review ? 'needs-review' : ''}`} key={field.id} onClick={() => setSelectedFieldId(field.id)}><div><span>{field.label}</span><Badge tone={review ? 'warning' : 'success'}>{review ? 'Revisar' : 'Extraído'}</Badge></div><strong>{formatEvidenceValue(field.value)}</strong><footer><span><i style={{ width: `${percent(field.confidence)}%` }} /></span><em>{percent(field.confidence)}%</em><small>Pág. {field.page}</small></footer></button>;
+              return <button type="button" className={`${field.id === selectedField?.id ? 'is-selected' : ''} ${review ? 'needs-review' : ''}`} aria-pressed={field.id === selectedField?.id} key={field.id} onClick={() => setSelectedFieldId(field.id)}><div><span>{field.label}</span><Badge tone={review ? 'warning' : 'success'}>{review ? 'Revisar' : 'Extraído'}</Badge></div><strong>{formatEvidenceValue(field.value)}</strong><footer><span><i style={{ width: `${percent(field.confidence)}%` }} /></span><em>{percent(field.confidence)}%</em><small>Pág. {field.page}</small></footer></button>;
             })}
             {!fields.length && <div className="ai-mini-empty"><CheckCircle2 size={20} /><span>No hay campos en este filtro.</span></div>}
           </div>
           <div className="generated-evidence-preview">
-            <header><div><FileSearch size={17} /><span><strong>{selectedField?.label || 'Evidencia documental'}</strong><small>{selectedDocument?.filename || 'Selecciona un campo'}</small></span></div>{selectedUrl && <a href={selectedUrl} target="_blank" rel="noreferrer">Abrir fuente <ExternalLink size={14} /></a>}</header>
-            {selectedUrl ? <iframe key={`${selectedField?.id}-${selectedField?.page}`} src={selectedUrl} title={`Evidencia de ${selectedField?.label}`} /> : <div className="ai-mini-empty"><FileSearch size={22} /><span>Selecciona un campo para visualizar su fuente.</span></div>}
+            <header><div><Eye size={17} /><span><strong>{selectedField?.label || 'Evidencia documental'}</strong><small>{selectedDocument?.filename || 'Selecciona un campo'}</small></span></div>{selectedUrl && <a href={selectedUrl} target="_blank" rel="noreferrer">Abrir fuente <ExternalLink size={14} /></a>}</header>
+            {selectedUrl ? (
+              <div className="generated-evidence-canvas">
+                <div
+                  className={`synthetic-page ${visualSource && !previewFailed ? 'synthetic-page--source' : ''}`}
+                  aria-label={`Vista de la página ${selectedField?.page || 1}`}
+                  style={visualSource && !previewFailed && previewAspectRatio ? { aspectRatio: previewAspectRatio } : undefined}
+                >
+                  {visualSource && !previewFailed ? (
+                    <>
+                      {!previewReady && <div className="document-preview-loading"><ScanLine size={24} /><strong>Preparando vista previa…</strong><small>La página se conserva en caché privada para las siguientes consultas.</small></div>}
+                      <img
+                        className={previewReady ? 'is-ready' : ''}
+                        src={previewUrl}
+                        alt={`Página ${selectedField?.page || 1} de ${selectedDocument?.filename || 'documento'}`}
+                        onLoad={(event) => {
+                          const image = event.currentTarget;
+                          if (image.naturalWidth > 0 && image.naturalHeight > 0) setPreviewAspectRatio(image.naturalWidth / image.naturalHeight);
+                          setPreviewReady(true);
+                        }}
+                        onError={() => { setPreviewFailed(true); setPreviewReady(false); setPreviewAspectRatio(null); }}
+                      />
+                    </>
+                  ) : <div className="ai-mini-empty"><FileSearch size={22} /><span>La vista previa no está disponible; abre el documento fuente.</span></div>}
+                  {selectedField && verifiedBoxStyle && visualSource && previewReady && <div className="synthetic-page__highlight" style={verifiedBoxStyle}><span>{selectedField.label}</span></div>}
+                  <small>Página original {selectedField?.page || 1}</small>
+                </div>
+                {verifiedBoxStyle && previewReady
+                  ? <p className="evidence-preview__notice evidence-preview__notice--verified"><CheckCircle2 size={13} /> Ubicación verificada en el PDF.</p>
+                  : <p className="evidence-preview__notice evidence-preview__notice--unavailable"><AlertCircle size={13} /> Este dato conserva documento y página; el marco requiere una coincidencia verificable.</p>}
+              </div>
+            ) : <div className="ai-mini-empty"><FileSearch size={22} /><span>Selecciona un campo para visualizar su fuente.</span></div>}
             {selectedField && <div className="generated-evidence-caption"><Target size={15} /><p><span>Evidencia detectada</span>{selectedField.evidence}</p><Badge tone={percent(selectedField.confidence) >= 90 ? 'success' : 'warning'}>{percent(selectedField.confidence)}%</Badge></div>}
           </div>
         </div>

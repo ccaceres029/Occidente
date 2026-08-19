@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { access, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -154,24 +154,39 @@ interface FieldSearchTarget {
 }
 
 const fieldSearchValues = (field: ExtractedDocumentField): FieldSearchTarget[] => {
-  if (field.value === null || typeof field.value === 'boolean') return [];
+  const targets: FieldSearchTarget[] = [];
   if (typeof field.value === 'string') {
     if (field.value.includes('*')) {
       const visibleTail = normalizeWord(field.value).slice(-4);
-      return visibleTail.length === 4 ? [{ tokens: [visibleTail], match: 'suffix' }] : [];
+      if (visibleTail.length === 4) targets.push({ tokens: [visibleTail], match: 'suffix' });
+    } else {
+      const tokens = normalizedTokens(field.value);
+      if (tokens.length > 0) targets.push({ tokens, match: 'exact' });
     }
-    const tokens = normalizedTokens(field.value);
-    return tokens.length > 0 ? [{ tokens, match: 'exact' }] : [];
   }
   if (typeof field.value === 'number' && Number.isFinite(field.value)) {
     const variants = [String(field.value), field.value.toFixed(2)]
       .map(normalizedTokens)
       .filter((tokens) => tokens.length > 0);
-    return variants.filter(
+    targets.push(...variants.filter(
       (tokens, index) => variants.findIndex((candidate) => candidate.join('|') === tokens.join('|')) === index,
-    ).map((tokens) => ({ tokens, match: 'suffix' }));
+    ).map((tokens): FieldSearchTarget => ({ tokens, match: 'suffix' })));
   }
-  return [];
+  const evidenceTokens = normalizedTokens(field.evidence).filter((token) => token.length > 1);
+  if (evidenceTokens.length >= 2 && evidenceTokens.length <= 14) {
+    targets.push({ tokens: evidenceTokens, match: 'exact' });
+  }
+  if (targets.length === 0) {
+    const labelTokens = normalizedTokens(field.label).filter((token) => token.length > 1);
+    if (labelTokens.length >= 2 && labelTokens.length <= 10) {
+      targets.push({ tokens: labelTokens, match: 'exact' });
+    }
+  }
+  return targets.filter(
+    (target, index) => targets.findIndex(
+      (candidate) => candidate.match === target.match && candidate.tokens.join('|') === target.tokens.join('|'),
+    ) === index,
+  );
 };
 
 const clamp = (value: number) => Math.min(1, Math.max(0, value));
@@ -434,4 +449,60 @@ export async function applyVerifiedPdfEvidence(
       };
     }),
   };
+}
+
+export interface BufferedEvidenceDocument {
+  id: string;
+  contentType: string;
+  content: Buffer;
+}
+
+export async function applyVerifiedBufferedPdfEvidence(
+  insight: DocumentIntelligenceInsight,
+  documents: BufferedEvidenceDocument[],
+  locator = new PdfEvidenceLocator(),
+): Promise<DocumentIntelligenceInsight> {
+  const temporaryDir = await mkdtemp(path.join(tmpdir(), 'occi-generated-evidence-'));
+  const fieldLocations = new Map<string, VerifiedPdfEvidence>();
+  try {
+    await Promise.all(documents.map(async (document, index) => {
+      if (document.contentType !== 'application/pdf' || document.content.length > PDF_EVIDENCE_MAX_BYTES) return;
+      const sourcePath = path.join(temporaryDir, `${index}-${document.id}.pdf`);
+      await writeFile(sourcePath, document.content);
+      const fields = insight.extractedFields.filter((field) => field.documentId === document.id);
+      const locations = await locator.locate(sourcePath, fields);
+      for (const [fieldId, location] of locations) fieldLocations.set(fieldId, location);
+    }));
+
+    const aggregateFatca = insight.extractedFields.find((field) => field.field === 'fatcaPositive');
+    if (aggregateFatca && !fieldLocations.has(aggregateFatca.id)) {
+      const positiveIndicator = insight.extractedFields.find((field) =>
+        field.documentId === aggregateFatca.documentId &&
+        field.field.startsWith('fatca') &&
+        field.field !== 'fatcaPositive' &&
+        field.value === true &&
+        fieldLocations.has(field.id));
+      const location = positiveIndicator ? fieldLocations.get(positiveIndicator.id) : undefined;
+      if (location) fieldLocations.set(aggregateFatca.id, location);
+    }
+
+    return {
+      ...insight,
+      extractedFields: insight.extractedFields.map((field) => {
+        const location = fieldLocations.get(field.id);
+        if (!location) {
+          const { boundingBox: _existingBox, ...withoutBox } = field;
+          return { ...withoutBox, evidenceLocation: 'unavailable' };
+        }
+        return {
+          ...field,
+          page: location.page,
+          boundingBox: location.boundingBox,
+          evidenceLocation: 'verified-pdf-text',
+        };
+      }),
+    };
+  } finally {
+    await rm(temporaryDir, { recursive: true, force: true });
+  }
 }

@@ -107,6 +107,35 @@ export class DocumentPreviewCache {
     }
   }
 
+  async getBuffer(source: Buffer, storageKey: string, page: number): Promise<DocumentPreviewResult> {
+    if (source.length === 0) throw new Error('El archivo fuente está vacío.');
+    const fingerprint = createHash('sha256')
+      .update(CACHE_VERSION)
+      .update('\0buffer\0')
+      .update(storageKey)
+      .update('\0')
+      .update(createHash('sha256').update(source).digest())
+      .update('\0')
+      .update(String(page))
+      .digest('hex');
+    const cachePath = path.join(this.cacheDir, `${fingerprint}.png`);
+    const etag = `"preview-${fingerprint}"`;
+
+    const cached = await this.readCached(cachePath);
+    if (cached) return { buffer: cached, cacheStatus: 'hit', etag };
+
+    const activeRender = this.inFlight.get(cachePath);
+    if (activeRender) return { buffer: await activeRender, cacheStatus: 'hit', etag };
+
+    const render = this.renderBufferAndPersist(source, page, cachePath);
+    this.inFlight.set(cachePath, render);
+    try {
+      return { buffer: await render, cacheStatus: 'miss', etag };
+    } finally {
+      this.inFlight.delete(cachePath);
+    }
+  }
+
   async clear(): Promise<void> {
     await rm(this.cacheDir, { recursive: true, force: true });
     await mkdir(this.cacheDir, { recursive: true });
@@ -140,6 +169,17 @@ export class DocumentPreviewCache {
     }
     void this.prune().catch(() => undefined);
     return rendered;
+  }
+
+  private async renderBufferAndPersist(source: Buffer, page: number, cachePath: string): Promise<Buffer> {
+    const sourceDir = await mkdtemp(path.join(tmpdir(), 'occi-document-source-'));
+    const sourcePath = path.join(sourceDir, 'document.pdf');
+    try {
+      await writeFile(sourcePath, source);
+      return await this.renderAndPersist(sourcePath, page, cachePath);
+    } finally {
+      await rm(sourceDir, { recursive: true, force: true });
+    }
   }
 
   private async prune(): Promise<void> {

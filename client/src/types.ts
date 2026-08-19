@@ -395,7 +395,7 @@ export interface AiExtractedField {
   confidence: number;
   page: number;
   evidence: string;
-  evidenceLocation?: 'verified-pdf-text' | 'unavailable';
+  evidenceLocation?: 'verified-pdf-text' | 'gemini-pdf-page' | 'unavailable';
   boundingBox?: { x: number; y: number; width: number; height: number };
   status: string;
   origin?: string;
