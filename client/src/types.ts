@@ -109,6 +109,12 @@ export interface GeneratedCaseSummary {
   documentCount: number;
   createdAt: string;
   documentAnalysis?: DocumentCompletenessAnalysis;
+  workflow: {
+    stage: 'DOCUMENT_INCOMPLETE' | 'READY_FOR_ANALYSIS' | 'ANALYZING' | 'DECISION_PENDING' | 'ANALYSIS_ERROR';
+    label: string;
+    progress: number;
+  };
+  risk?: RiskData;
 }
 
 export interface GeneratedCaseDetail extends GeneratedCaseSummary {
@@ -119,6 +125,13 @@ export interface GeneratedCaseDetail extends GeneratedCaseSummary {
     subject: string;
     recipientEmail?: string;
     sentAt?: string;
+    error?: string;
+  };
+  documentIntelligence?: DocumentAiInsights;
+  intelligenceStatus?: {
+    status: 'ANALYZING' | 'COMPLETE' | 'ERROR';
+    model?: string;
+    analyzedAt?: string;
     error?: string;
   };
 }
@@ -457,6 +470,7 @@ export interface DocumentAiInsights {
   anomalies: AiAnomaly[];
   sourceOfFunds: AiSourceOfFundsInsight;
   recommendation: AiRecommendation;
+  limitations?: string[];
 }
 
 export interface ActionResponse {

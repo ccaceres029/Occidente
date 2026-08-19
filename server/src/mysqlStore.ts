@@ -331,6 +331,29 @@ export class MysqlStore implements CaseStore {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     `);
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS generated_case_intelligence (
+        case_id CHAR(36) PRIMARY KEY,
+        status VARCHAR(20) NOT NULL,
+        provider VARCHAR(30) NULL,
+        model VARCHAR(100) NULL,
+        fingerprint CHAR(64) NOT NULL,
+        engine_version VARCHAR(64) NOT NULL,
+        risk_level VARCHAR(12) NULL,
+        risk_score TINYINT UNSIGNED NULL,
+        risk_route VARCHAR(40) NULL,
+        recommendation VARCHAR(40) NULL,
+        result_json JSON NULL,
+        error_message VARCHAR(1000) NULL,
+        analyzed_at DATETIME(3) NULL,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        INDEX idx_generated_intelligence_status (status, updated_at),
+        INDEX idx_generated_intelligence_risk (risk_level, risk_score),
+        CONSTRAINT fk_generated_intelligence_case FOREIGN KEY (case_id)
+          REFERENCES generated_cases(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `);
+    await this.pool.query(`
       CREATE TABLE IF NOT EXISTS generated_case_mail_events (
         id CHAR(36) PRIMARY KEY,
         case_id CHAR(36) NOT NULL,

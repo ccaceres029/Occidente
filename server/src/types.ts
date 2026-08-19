@@ -82,9 +82,9 @@ export interface DocumentClassification {
   predictedType: string;
   label: string;
   confidence: number;
-  method: 'synthetic-template' | 'metadata-inference';
+  method: 'synthetic-template' | 'metadata-inference' | 'gemini-document';
   pages: number;
-  source: 'seed-synthetic-metadata' | 'uploaded-synthetic-metadata';
+  source: 'seed-synthetic-metadata' | 'uploaded-synthetic-metadata' | 's3-private-document';
   contentUrl: string;
   quality: {
     readability: number;
@@ -104,9 +104,9 @@ export interface ExtractedDocumentField {
   page: number;
   evidence: string;
   boundingBox?: NormalizedBoundingBox;
-  evidenceLocation: 'verified-pdf-text' | 'unavailable';
+  evidenceLocation: 'verified-pdf-text' | 'gemini-pdf-page' | 'unavailable';
   status: 'EXTRACTED' | 'MISSING' | 'LOW_CONFIDENCE' | 'CONFLICT';
-  origin: 'synthetic-canonical-template';
+  origin: 'synthetic-canonical-template' | 'gemini-document-extraction';
 }
 
 export interface ConsistencySource {
@@ -190,10 +190,10 @@ export interface DocumentIntelligenceInsight {
     provider: 'gemini' | 'local-fallback';
     configured: boolean;
     cached: boolean;
-    syntheticOnly: true;
-    mode: 'document-pipeline-demo';
-    dataOrigin: 'synthetic-canonical-snapshot';
-    extractionMethod: 'template-mapped-canonical-data';
+    syntheticOnly: boolean;
+    mode: 'document-pipeline-demo' | 'generated-case-document-pipeline';
+    dataOrigin: 'synthetic-canonical-snapshot' | 'private-s3-case-documents';
+    extractionMethod: 'template-mapped-canonical-data' | 'gemini-multimodal-document-extraction';
     notOcrNotice: string;
     confidenceNotice: string;
   };

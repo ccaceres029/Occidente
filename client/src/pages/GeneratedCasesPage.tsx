@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowRight, CalendarDays, FileStack, FolderKanban, Mail, Search, Trash2 } from 'lucide-react';
+import { ArrowRight, BrainCircuit, CalendarDays, CircleGauge, FileStack, FolderKanban, Mail, Search, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
@@ -12,6 +12,11 @@ function dateLabel(value: string, withTime = false): string {
     timeZone: 'America/Tegucigalpa',
   }).format(new Date(value));
 }
+
+const stageTone = (stage: GeneratedCaseSummary['workflow']['stage']) =>
+  stage === 'ANALYSIS_ERROR' ? 'danger' : stage === 'DOCUMENT_INCOMPLETE' ? 'warning' : stage === 'DECISION_PENDING' ? 'purple' : 'success';
+
+const riskTone = (level?: string) => level === 'ALTO' ? 'danger' : level === 'MEDIO' ? 'warning' : 'success';
 
 export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthUser }) {
   const [items, setItems] = useState<GeneratedCaseSummary[]>([]);
@@ -36,6 +41,12 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
 
   useEffect(() => { void load(); }, [load]);
 
+  useEffect(() => {
+    if (!items.some((item) => ['READY_FOR_ANALYSIS', 'ANALYZING'].includes(item.workflow.stage))) return;
+    const timer = window.setInterval(() => void load(), 8_000);
+    return () => window.clearInterval(timer);
+  }, [items, load]);
+
   const visible = useMemo(() => {
     const term = search.trim().toLocaleLowerCase('es-HN');
     if (!term) return items;
@@ -47,6 +58,7 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
   if (error && !items.length) return <ErrorState message={error} onRetry={() => void load()} />;
 
   const documentTotal = items.reduce((sum, item) => sum + item.documentCount, 0);
+  const decisionTotal = items.filter((item) => item.workflow.stage === 'DECISION_PENDING').length;
 
   const deleteCase = async () => {
     if (!confirmDelete) return;
@@ -81,6 +93,7 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
         <div><FolderKanban size={20} /><span><small>Casos creados</small><strong>{items.length}</strong></span></div>
         <div><FileStack size={20} /><span><small>Documentos en S3</small><strong>{documentTotal}</strong></span></div>
         <div><CalendarDays size={20} /><span><small>Última recepción</small><strong>{items[0] ? dateLabel(items[0].receivedAt) : 'Sin datos'}</strong></span></div>
+        <div><BrainCircuit size={20} /><span><small>Decisión pendiente</small><strong>{decisionTotal}</strong></span></div>
       </section>
 
       <section className="generated-toolbar">
@@ -92,11 +105,13 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
         <EmptyState icon={<FolderKanban size={26} />} title={items.length ? 'No hay coincidencias' : 'Aún no hay casos generados'} body={items.length ? 'Ajusta el término de búsqueda.' : 'Recibe los correos desde Solicitudes entrantes para iniciar la codificación.'} />
       ) : (
         <section className="generated-list" aria-busy={loading}>
-          <header><span>Caso y solicitud</span><span>Remitente</span><span>Recepción</span><span>Documentos</span><span /></header>
+          <header><span>Caso y solicitud</span><span>Remitente</span><span>Etapa</span><span>Riesgo</span><span>Recepción</span><span>Documentos</span><span /></header>
           {visible.map((item) => (
             <article key={item.id}>
               <div className="generated-list__case"><span><Mail size={18} /></span><div><strong>{item.code}</strong><p>{item.subject}</p></div></div>
               <div className="generated-list__sender"><strong>{item.senderName || 'Remitente'}</strong><small>{item.senderEmail || 'Sin dirección disponible'}</small></div>
+              <Badge tone={stageTone(item.workflow.stage)}><BrainCircuit size={12} /> {item.workflow.label}</Badge>
+              {item.risk ? <Badge tone={riskTone(item.risk.level)}><CircleGauge size={12} /> {item.risk.level} · {item.risk.score}</Badge> : <span className="generated-list__risk-empty">Sin evaluar</span>}
               <time dateTime={item.receivedAt}>{dateLabel(item.receivedAt, true)}</time>
               <Badge tone={item.documentAnalysis?.missingCount ? 'warning' : item.documentCount ? 'success' : 'neutral'}>
                 <FileStack size={12} /> {item.documentCount}{item.documentAnalysis ? ` · ${item.documentAnalysis.completenessPercent}%` : ''}
@@ -110,7 +125,7 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
         </section>
       )}
       <Modal open={Boolean(confirmDelete)} title="Eliminar caso en cascada" description="Esta acción es irreversible y está restringida a administradores." onClose={() => !deleting && setConfirmDelete(null)}>
-        {confirmDelete && <div className="cascade-delete"><Trash2 size={28} /><div><p>Se eliminará <strong>{confirmDelete.code}</strong> junto con:</p><ul><li>El registro del correo recibido</li><li>Los {confirmDelete.documentCount} documentos relacionados</li><li>La carpeta completa del caso en S3</li></ul></div><footer><Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancelar</Button><Button variant="danger" loading={deleting} onClick={() => void deleteCase()}>Eliminar definitivamente</Button></footer></div>}
+        {confirmDelete && <div className="cascade-delete"><Trash2 size={28} /><div><p>Se eliminará <strong>{confirmDelete.code}</strong> junto con:</p><ul><li>El registro del correo recibido</li><li>Los {confirmDelete.documentCount} documentos relacionados</li><li>El control documental y el análisis integral</li><li>La carpeta completa del caso en S3</li></ul></div><footer><Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancelar</Button><Button variant="danger" loading={deleting} onClick={() => void deleteCase()}>Eliminar definitivamente</Button></footer></div>}
       </Modal>
       {toast && <Toast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>

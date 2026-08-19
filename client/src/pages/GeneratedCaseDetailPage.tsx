@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowLeft, CheckCircle2, Download, Eye, File, FileStack, HardDrive, Mail, MailCheck, RefreshCw, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, BrainCircuit, Check, CheckCircle2, Download, Eye, File, FileStack, HardDrive, Mail, MailCheck, RefreshCw, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
+import GeneratedCaseIntelligencePanel from '../components/GeneratedCaseIntelligencePanel';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
 import type { AuthUser, GeneratedCaseDetail, GeneratedCaseDocument } from '../types';
 
@@ -23,6 +24,14 @@ function previewable(document: GeneratedCaseDocument): boolean {
   return document.contentType === 'application/pdf' || document.contentType.startsWith('image/') || document.contentType.startsWith('text/');
 }
 
+function orderDocuments(detail: GeneratedCaseDetail): GeneratedCaseDetail {
+  return {
+    ...detail,
+    documents: [...detail.documents].sort((left, right) =>
+      left.filename.localeCompare(right.filename, 'es-HN', { numeric: true, sensitivity: 'base' })),
+  };
+}
+
 export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: AuthUser }) {
   const { id = '' } = useParams();
   const navigate = useNavigate();
@@ -33,6 +42,7 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [activeView, setActiveView] = useState<'documents' | 'analysis'>('documents');
   const [toast, setToast] = useState<{ message: string; tone: 'success' | 'danger' } | null>(null);
 
   useEffect(() => {
@@ -41,13 +51,26 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
     api.generatedCase(id)
       .then(({ case: generated }) => {
         if (!active) return;
-        setDetail(generated);
-        setSelectedId(generated.documents[0]?.id || '');
+        const ordered = orderDocuments(generated);
+        setDetail(ordered);
+        setSelectedId(ordered.documents[0]?.id || '');
+        if (generated.documentAnalysis?.status === 'COMPLETE' || generated.intelligenceStatus?.status === 'ERROR') setActiveView('analysis');
       })
       .catch((loadError) => active && setError(loadError instanceof Error ? loadError.message : 'No fue posible cargar el caso.'))
       .finally(() => active && setLoading(false));
     return () => { active = false; };
   }, [id]);
+
+  useEffect(() => {
+    if (!detail || detail.documentAnalysis?.status !== 'COMPLETE' || detail.intelligenceStatus?.status === 'COMPLETE' || detail.intelligenceStatus?.status === 'ERROR') return;
+    const timer = window.setInterval(() => {
+      api.generatedCase(id).then(({ case: generated }) => {
+        setDetail(orderDocuments(generated));
+        if (generated.documentIntelligence || generated.intelligenceStatus?.status === 'ERROR') setActiveView('analysis');
+      }).catch(() => undefined);
+    }, 3_500);
+    return () => window.clearInterval(timer);
+  }, [detail, id]);
 
   const selected = useMemo(() => detail?.documents.find((document) => document.id === selectedId), [detail, selectedId]);
   const selectedUrl = selected && detail ? api.generatedDocumentUrl(detail.id, selected.id) : '';
@@ -71,8 +94,9 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
     setAnalyzing(true);
     try {
       const result = await api.analyzeGeneratedCase(detail.id);
-      setDetail(result.case);
-      setToast({ message: 'Control de recepción documental actualizado.', tone: 'success' });
+      setDetail(orderDocuments(result.case));
+      if (result.case.documentAnalysis?.status === 'COMPLETE' || result.case.intelligenceStatus?.status === 'ERROR') setActiveView('analysis');
+      setToast({ message: result.case.documentIntelligence ? 'Análisis integral del expediente actualizado.' : result.case.documentAnalysis?.status === 'COMPLETE' ? 'Análisis integral iniciado; el resultado aparecerá automáticamente.' : 'Control de recepción documental actualizado.', tone: 'success' });
     } catch (analysisError) {
       setToast({ message: analysisError instanceof Error ? analysisError.message : 'No fue posible actualizar el análisis.', tone: 'danger' });
     } finally {
@@ -93,9 +117,20 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
           <p>{detail.subject}</p>
         </div>
         <div className="page-lead__actions">
-          <Badge tone="success" dot>Recibido</Badge>
+          <Badge tone={detail.workflow.stage === 'ANALYSIS_ERROR' ? 'danger' : detail.workflow.stage === 'DOCUMENT_INCOMPLETE' ? 'warning' : 'success'} dot>{detail.workflow.label}</Badge>
           {currentUser.role === 'ADMIN' && <Button variant="danger" icon={<Trash2 size={16} />} onClick={() => setConfirmDelete(true)}>Eliminar caso</Button>}
         </div>
+      </section>
+
+      <section className="generated-case-steps" aria-label="Etapas del caso">
+        {[
+          { key: 'DOCUMENT', label: 'Control documental', detail: detail.documentAnalysis?.missingCount ? `${detail.documentAnalysis.completenessPercent}% recibido` : 'Paquete completo' },
+          { key: 'ANALYSIS', label: 'Análisis del expediente', detail: detail.workflow.stage === 'ANALYZING' ? 'En ejecución' : detail.documentIntelligence ? 'Resultado disponible' : 'Pendiente' },
+          { key: 'DECISION', label: 'Decisión humana', detail: detail.workflow.stage === 'DECISION_PENDING' ? 'Acción requerida' : 'Pendiente' },
+        ].map((step, index) => {
+          const current = detail.workflow.stage === 'DOCUMENT_INCOMPLETE' ? 0 : ['READY_FOR_ANALYSIS', 'ANALYZING', 'ANALYSIS_ERROR'].includes(detail.workflow.stage) ? 1 : 2;
+          return <div className={index < current ? 'is-complete' : index === current ? 'is-current' : ''} key={step.key}><span>{index < current ? <Check size={15} /> : index + 1}</span><p><strong>{step.label}</strong><small>{step.detail}</small></p>{index < 2 && <i />}</div>;
+        })}
       </section>
 
       <section className="generated-detail-meta">
@@ -144,7 +179,12 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
         </section>
       )}
 
-      {detail.documents.length ? (
+      <nav className="generated-case-tabs" aria-label="Contenido del caso">
+        <button type="button" className={activeView === 'documents' ? 'is-active' : ''} onClick={() => setActiveView('documents')}><FileStack size={16} /> Documentos <span>{detail.documents.length}</span></button>
+        <button type="button" className={activeView === 'analysis' ? 'is-active' : ''} onClick={() => setActiveView('analysis')}><BrainCircuit size={16} /> Análisis integral {detail.documentIntelligence && <CheckCircle2 size={14} />}</button>
+      </nav>
+
+      {activeView === 'documents' && (detail.documents.length ? (
         <div className="generated-document-workspace">
           <aside className="generated-document-list">
             <header><FileStack size={17} /><div><strong>Documentos</strong><small>{detail.documents.length} archivo(s)</small></div></header>
@@ -165,10 +205,12 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
             </>}
           </section>
         </div>
-      ) : <EmptyState icon={<FileStack size={26} />} title="Caso sin documentos adjuntos" body="El correo fue codificado correctamente, pero no contenía archivos adjuntos." />}
+      ) : <EmptyState icon={<FileStack size={26} />} title="Caso sin documentos adjuntos" body="El correo fue codificado correctamente, pero no contenía archivos adjuntos." />)}
+
+      {activeView === 'analysis' && <GeneratedCaseIntelligencePanel detail={detail} analyzing={analyzing} onAnalyze={() => void analyzeCase()} />}
 
       <Modal open={confirmDelete} title="Eliminar caso en cascada" description="Esta acción es irreversible y está restringida a administradores." onClose={() => !deleting && setConfirmDelete(false)}>
-        <div className="cascade-delete"><Trash2 size={28} /><div><p>Se eliminará <strong>{detail.code}</strong> junto con:</p><ul><li>El registro del correo recibido</li><li>Los {detail.documentCount} documentos relacionados</li><li>La carpeta completa del caso en S3</li></ul></div><footer><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancelar</Button><Button variant="danger" loading={deleting} onClick={() => void deleteCase()}>Eliminar definitivamente</Button></footer></div>
+        <div className="cascade-delete"><Trash2 size={28} /><div><p>Se eliminará <strong>{detail.code}</strong> junto con:</p><ul><li>El registro del correo recibido</li><li>Los {detail.documentCount} documentos relacionados</li><li>El control documental y el análisis integral</li><li>La carpeta completa del caso en S3</li></ul></div><footer><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancelar</Button><Button variant="danger" loading={deleting} onClick={() => void deleteCase()}>Eliminar definitivamente</Button></footer></div>
       </Modal>
       {toast && <Toast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>

@@ -15,7 +15,13 @@ import {
   type DocumentCompletenessAnalysis,
   type DocumentCompletenessItem,
 } from './documentCompleteness.js';
+import {
+  analyzeGeneratedCaseIntelligence,
+  GENERATED_CASE_INTELLIGENCE_VERSION,
+  generatedCaseIntelligenceFingerprint,
+} from './generatedCaseIntelligence.js';
 import { ObjectStorage } from './objectStorage.js';
+import type { DocumentIntelligenceInsight, RiskAssessment } from './types.js';
 
 export interface MailSettings {
   emailAddress: string;
@@ -84,12 +90,29 @@ export interface GeneratedCaseSummary {
   documentCount: number;
   createdAt: string;
   documentAnalysis?: DocumentCompletenessAnalysis;
+  workflow: GeneratedCaseWorkflow;
+  risk?: RiskAssessment;
 }
 
 export interface GeneratedCaseDetail extends GeneratedCaseSummary {
   incomingRequestId: string;
   documents: GeneratedCaseDocument[];
   missingDocumentRequest?: MissingDocumentRequestStatus;
+  documentIntelligence?: DocumentIntelligenceInsight;
+  intelligenceStatus?: GeneratedIntelligenceStatus;
+}
+
+export interface GeneratedCaseWorkflow {
+  stage: 'DOCUMENT_INCOMPLETE' | 'READY_FOR_ANALYSIS' | 'ANALYZING' | 'DECISION_PENDING' | 'ANALYSIS_ERROR';
+  label: string;
+  progress: number;
+}
+
+export interface GeneratedIntelligenceStatus {
+  status: 'ANALYZING' | 'COMPLETE' | 'ERROR';
+  model?: string;
+  analyzedAt?: string;
+  error?: string;
 }
 
 export interface MissingDocumentRequestStatus {
@@ -157,6 +180,14 @@ interface GeneratedCaseRow extends RowDataPacket {
   analysis_model: string | null;
   analysis_version: string | null;
   analyzed_at: Date | null;
+  intelligence_status: GeneratedIntelligenceStatus['status'] | null;
+  intelligence_model: string | null;
+  intelligence_result: DocumentIntelligenceInsight | string | null;
+  intelligence_error: string | null;
+  intelligence_analyzed_at: Date | null;
+  risk_level: RiskAssessment['level'] | null;
+  risk_score: number | null;
+  risk_route: RiskAssessment['route'] | null;
 }
 
 interface GeneratedDocumentRow extends RowDataPacket {
@@ -217,6 +248,19 @@ interface MailEventRow extends RowDataPacket {
   error_message: string | null;
 }
 
+interface StoredIntelligenceRow extends RowDataPacket {
+  status: GeneratedIntelligenceStatus['status'];
+  model: string | null;
+  fingerprint: string;
+  engine_version: string;
+  result_json: DocumentIntelligenceInsight | string | null;
+  error_message: string | null;
+  analyzed_at: Date | null;
+  risk_level: RiskAssessment['level'] | null;
+  risk_score: number | null;
+  risk_route: RiskAssessment['route'] | null;
+}
+
 function publicSettings(row: SettingsRow): MailSettings {
   return {
     emailAddress: row.email_address,
@@ -256,6 +300,15 @@ function publicIncoming(row: IncomingRow): IncomingRequest {
 }
 
 function publicGeneratedCase(row: GeneratedCaseRow): GeneratedCaseSummary {
+  const workflow: GeneratedCaseWorkflow = row.analysis_status !== 'COMPLETE'
+    ? { stage: 'DOCUMENT_INCOMPLETE', label: 'Control documental', progress: 33 }
+    : row.intelligence_status === 'ANALYZING'
+      ? { stage: 'ANALYZING', label: 'Análisis en curso', progress: 68 }
+      : row.intelligence_status === 'COMPLETE'
+        ? { stage: 'DECISION_PENDING', label: 'Decisión pendiente', progress: 90 }
+        : row.intelligence_status === 'ERROR'
+          ? { stage: 'ANALYSIS_ERROR', label: 'Revisar análisis', progress: 55 }
+          : { stage: 'READY_FOR_ANALYSIS', label: 'Listo para analizar', progress: 45 };
   const generatedCase: GeneratedCaseSummary = {
     id: row.id,
     code: row.code,
@@ -266,7 +319,16 @@ function publicGeneratedCase(row: GeneratedCaseRow): GeneratedCaseSummary {
     receivedAt: row.received_at.toISOString(),
     documentCount: Number(row.document_count),
     createdAt: row.created_at.toISOString(),
+    workflow,
   };
+  if (row.risk_level && row.risk_route && row.risk_score !== null) {
+    generatedCase.risk = {
+      level: row.risk_level,
+      score: Number(row.risk_score),
+      route: row.risk_route,
+      reasons: [],
+    };
+  }
   if (row.analysis_status && row.analysis_provider && row.analyzed_at) {
     generatedCase.documentAnalysis = {
       status: row.analysis_status,
@@ -296,6 +358,17 @@ function publicGeneratedDocument(row: GeneratedDocumentRow): GeneratedCaseDocume
     checksumSha256: row.checksum_sha256,
     createdAt: row.created_at.toISOString(),
   };
+}
+
+function parseIntelligence(value: GeneratedCaseRow['intelligence_result']): DocumentIntelligenceInsight | undefined {
+  if (!value) return undefined;
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value) as DocumentIntelligenceInsight;
+    return parsed && typeof parsed === 'object' ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function caseDate(receivedAt: Date): string {
@@ -333,6 +406,7 @@ function decryptSecret(value: string, key: Buffer): string {
 
 export class MailService {
   private syncing = false;
+  private readonly intelligenceRuns = new Map<string, Promise<void>>();
 
   constructor(
     private readonly pool: Pool,
@@ -416,13 +490,23 @@ export class MailService {
         analysis.gemini_configured, analysis.completeness_percent, analysis.expected_count,
         analysis.received_count, analysis.missing_count, analysis.unclassified_count,
         analysis.summary AS analysis_summary, analysis.model AS analysis_model,
-        analysis.analysis_version, analysis.analyzed_at
+        analysis.analysis_version, analysis.analyzed_at,
+        intelligence.status AS intelligence_status, intelligence.model AS intelligence_model,
+        NULL AS intelligence_result, intelligence.error_message AS intelligence_error,
+        intelligence.analyzed_at AS intelligence_analyzed_at,
+        intelligence.risk_level, intelligence.risk_score, intelligence.risk_route
        FROM generated_cases gc
        LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
+       LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id
        ORDER BY gc.received_at DESC, gc.code DESC LIMIT ?`,
       [safeLimit],
     );
-    return rows.map(publicGeneratedCase);
+    const generatedCases = rows.map(publicGeneratedCase);
+    for (const row of rows.filter((item) => item.analysis_status === 'COMPLETE' &&
+      (!item.intelligence_status || item.intelligence_status === 'ANALYZING')).slice(0, 3)) {
+      void this.ensureGeneratedCaseIntelligence(row.id, false).catch(() => undefined);
+    }
+    return generatedCases;
   }
 
   async getGeneratedCase(id: string): Promise<GeneratedCaseDetail | undefined> {
@@ -436,9 +520,14 @@ export class MailService {
         analysis.gemini_configured, analysis.completeness_percent, analysis.expected_count,
         analysis.received_count, analysis.missing_count, analysis.unclassified_count,
         analysis.summary AS analysis_summary, analysis.model AS analysis_model,
-        analysis.analysis_version, analysis.analyzed_at
+        analysis.analysis_version, analysis.analyzed_at,
+        intelligence.status AS intelligence_status, intelligence.model AS intelligence_model,
+        intelligence.result_json AS intelligence_result, intelligence.error_message AS intelligence_error,
+        intelligence.analyzed_at AS intelligence_analyzed_at,
+        intelligence.risk_level, intelligence.risk_score, intelligence.risk_route
        FROM generated_cases gc
        LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
+       LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id
        WHERE gc.id=? LIMIT 1`,
       [id],
     );
@@ -476,18 +565,33 @@ export class MailService {
       [id],
     );
     const latestRequest = mailRows[0];
+    const intelligence = parseIntelligence(row.intelligence_result);
+    if (intelligence) intelligence.analysis.cached = true;
+    if (generatedCase.risk && intelligence) generatedCase.risk.reasons = intelligence.recommendation.rationale;
     return {
       ...generatedCase,
       incomingRequestId: row.incoming_request_id,
       documents: documentRows.map(publicGeneratedDocument),
       ...(latestRequest ? { missingDocumentRequest: this.publicMissingDocumentRequest(latestRequest) } : {}),
+      ...(intelligence ? { documentIntelligence: intelligence } : {}),
+      ...(row.intelligence_status ? {
+        intelligenceStatus: {
+          status: row.intelligence_status,
+          ...(row.intelligence_model ? { model: row.intelligence_model } : {}),
+          ...(row.intelligence_analyzed_at ? { analyzedAt: row.intelligence_analyzed_at.toISOString() } : {}),
+          ...(row.intelligence_error ? { error: row.intelligence_error } : {}),
+        },
+      } : {}),
     };
   }
 
   async analyzeGeneratedCase(id: string, force = true): Promise<DocumentCompletenessAnalysis | undefined> {
     if (!force) {
       const stored = await this.storedDocumentAnalysis(id);
-      if (stored?.version === DOCUMENT_COMPLETENESS_VERSION) return stored;
+      if (stored?.version === DOCUMENT_COMPLETENESS_VERSION) {
+        if (stored.status === 'COMPLETE') void this.ensureGeneratedCaseIntelligence(id, false).catch(() => undefined);
+        return stored;
+      }
     }
     const [caseRows] = await this.pool.query<RowDataPacket[]>('SELECT id FROM generated_cases WHERE id=? LIMIT 1', [id]);
     if (!caseRows[0]) return undefined;
@@ -537,14 +641,118 @@ export class MailService {
             item.matchedDocumentId || null, item.confidence, item.reason, item.policyRef],
         );
       }
+      await connection.query(
+        'UPDATE generated_cases SET status=?, updated_at=UTC_TIMESTAMP(3) WHERE id=?',
+        [analysis.status === 'COMPLETE' ? 'ANALYSIS_PENDING' : 'DOCUMENT_INCOMPLETE', id],
+      );
       await connection.commit();
-      return analysis;
     } catch (error) {
       await connection.rollback();
       throw error;
     } finally {
       connection.release();
     }
+    if (analysis.status === 'COMPLETE') {
+      void this.ensureGeneratedCaseIntelligence(id, force).catch(() => undefined);
+    } else {
+      await this.pool.query('DELETE FROM generated_case_intelligence WHERE case_id=?', [id]);
+    }
+    return analysis;
+  }
+
+  async analyzeGeneratedCaseIntelligence(id: string, force = true): Promise<void> {
+    await this.ensureGeneratedCaseIntelligence(id, force);
+  }
+
+  private async ensureGeneratedCaseIntelligence(id: string, force: boolean): Promise<void> {
+    const active = this.intelligenceRuns.get(id);
+    if (active) return active;
+    const run = this.performGeneratedCaseIntelligence(id, force)
+      .finally(() => this.intelligenceRuns.delete(id));
+    this.intelligenceRuns.set(id, run);
+    return run;
+  }
+
+  private async performGeneratedCaseIntelligence(id: string, force: boolean): Promise<void> {
+    const [documentRows] = await this.pool.query<GeneratedDocumentRow[]>(
+      `SELECT id, case_id, filename, content_type, size_bytes, checksum_sha256,
+        s3_bucket, s3_key, created_at
+       FROM generated_case_documents WHERE case_id=? ORDER BY created_at, filename`,
+      [id],
+    );
+    if (!documentRows.length) return;
+    const currentFingerprint = generatedCaseIntelligenceFingerprint(documentRows.map((document) => ({
+      id: document.id,
+      checksumSha256: document.checksum_sha256,
+    })));
+    const stored = await this.storedIntelligence(id);
+    if (!force && stored?.status === 'COMPLETE' && stored.fingerprint === currentFingerprint &&
+      stored.engine_version === GENERATED_CASE_INTELLIGENCE_VERSION && stored.result_json) return;
+    if (!force && stored?.status === 'ERROR' && stored.fingerprint === currentFingerprint &&
+      stored.engine_version === GENERATED_CASE_INTELLIGENCE_VERSION) return;
+
+    await this.pool.query(
+      `INSERT INTO generated_case_intelligence
+        (case_id, status, provider, model, fingerprint, engine_version, result_json,
+         error_message, analyzed_at, created_at, updated_at)
+       VALUES (?, 'ANALYZING', 'gemini', ?, ?, ?, NULL, NULL, NULL, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))
+       ON DUPLICATE KEY UPDATE status='ANALYZING', provider='gemini', model=VALUES(model),
+         fingerprint=VALUES(fingerprint), engine_version=VALUES(engine_version), result_json=NULL,
+         error_message=NULL, analyzed_at=NULL, updated_at=UTC_TIMESTAMP(3)`,
+      [id, this.geminiConfig.model, currentFingerprint, GENERATED_CASE_INTELLIGENCE_VERSION],
+    );
+    await this.pool.query(
+      "UPDATE generated_cases SET status='ANALYZING', updated_at=UTC_TIMESTAMP(3) WHERE id=?",
+      [id],
+    );
+
+    try {
+      if (!this.objectStorage) throw new Error('El almacenamiento privado S3 no está configurado.');
+      const documents = await Promise.all(documentRows.map(async (document) => ({
+        id: document.id,
+        filename: document.filename,
+        contentType: document.content_type,
+        checksumSha256: document.checksum_sha256,
+        content: await this.objectStorage!.getObject(document.s3_key),
+      })));
+      const result = await analyzeGeneratedCaseIntelligence(id, documents, this.geminiConfig);
+      await this.pool.query(
+        `UPDATE generated_case_intelligence SET status='COMPLETE', provider='gemini', model=?,
+           fingerprint=?, engine_version=?, risk_level=?, risk_score=?, risk_route=?,
+           recommendation=?, result_json=?, error_message=NULL, analyzed_at=?, updated_at=UTC_TIMESTAMP(3)
+         WHERE case_id=?`,
+        [this.geminiConfig.model, currentFingerprint, GENERATED_CASE_INTELLIGENCE_VERSION,
+          result.risk.level, result.risk.score, result.risk.route,
+          result.insight.recommendation.decision, JSON.stringify(result.insight),
+          new Date(result.insight.analysis.generatedAt), id],
+      );
+      await this.pool.query(
+        "UPDATE generated_cases SET status='DECISION_PENDING', updated_at=UTC_TIMESTAMP(3) WHERE id=?",
+        [id],
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 1000) : 'Error no identificado durante el análisis.';
+      await this.pool.query(
+        `UPDATE generated_case_intelligence SET status='ERROR', error_message=?,
+           result_json=NULL, analyzed_at=UTC_TIMESTAMP(3), updated_at=UTC_TIMESTAMP(3)
+         WHERE case_id=?`,
+        [message, id],
+      );
+      await this.pool.query(
+        "UPDATE generated_cases SET status='ANALYSIS_ERROR', updated_at=UTC_TIMESTAMP(3) WHERE id=?",
+        [id],
+      );
+    }
+  }
+
+  private async storedIntelligence(id: string): Promise<StoredIntelligenceRow | undefined> {
+    const [rows] = await this.pool.query<StoredIntelligenceRow[]>(
+      `SELECT status, model, fingerprint, engine_version, result_json, error_message,
+        analyzed_at, risk_level, risk_score, risk_route
+       FROM generated_case_intelligence WHERE case_id=? LIMIT 1`,
+      [id],
+    );
+    return rows[0];
   }
 
   async notifyPendingMissingDocumentRequests(limit = 25): Promise<number> {
