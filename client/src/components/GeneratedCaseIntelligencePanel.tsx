@@ -52,7 +52,9 @@ export default function GeneratedCaseIntelligencePanel({
 
   useEffect(() => {
     if (insights?.extractedFields.length && !insights.extractedFields.some((field) => field.id === selectedFieldId)) {
-      setSelectedFieldId(insights.extractedFields[0].id);
+      const firstLocatedField = insights.extractedFields.find((field) =>
+        field.evidenceLocation === 'verified-pdf-text' && field.boundingBox);
+      setSelectedFieldId(firstLocatedField?.id || insights.extractedFields[0].id);
     }
   }, [insights, selectedFieldId]);
 
