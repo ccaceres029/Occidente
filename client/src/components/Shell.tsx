@@ -26,7 +26,7 @@ import { spanishDynamicText } from '../utils';
 import { APP_VERSION } from '../version';
 
 const titles: Array<[RegExp, string, string]> = [
-  [/^\/$/, 'Resumen operativo', 'Visión general de las afiliaciones'],
+  [/^\/$/, 'Resumen operativo', 'Solicitudes entrantes y casos generados'],
   [/^\/casos-generados\/[^/]+/, 'Caso generado', 'Correo recibido y documentos almacenados'],
   [/^\/casos-generados/, 'Casos generados', 'Solicitudes codificadas desde el correo'],
   [/^\/casos\/nuevo/, 'Nueva afiliación', 'Captura guiada y prevalidación'],

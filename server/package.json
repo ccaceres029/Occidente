@@ -1,6 +1,6 @@
 {
   "name": "@occi/server",
-  "version": "0.5.9",
+  "version": "0.5.10",
   "private": true,
   "type": "module",
   "description": "API local para el demo de afiliaciones AFPC Occidente",
