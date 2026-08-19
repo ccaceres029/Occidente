@@ -702,6 +702,7 @@ export class MailService {
        VALUES (?, 'ANALYZING', 'gemini', ?, ?, ?, NULL, NULL, NULL, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))
        ON DUPLICATE KEY UPDATE status='ANALYZING', provider='gemini', model=VALUES(model),
          fingerprint=VALUES(fingerprint), engine_version=VALUES(engine_version), result_json=NULL,
+         risk_level=NULL, risk_score=NULL, risk_route=NULL, recommendation=NULL,
          error_message=NULL, analyzed_at=NULL, updated_at=UTC_TIMESTAMP(3)`,
       [id, this.geminiConfig.model, currentFingerprint, GENERATED_CASE_INTELLIGENCE_VERSION],
     );
@@ -738,6 +739,7 @@ export class MailService {
       const message = error instanceof Error ? error.message.slice(0, 1000) : 'Error no identificado durante el análisis.';
       await this.pool.query(
         `UPDATE generated_case_intelligence SET status='ERROR', error_message=?,
+           risk_level=NULL, risk_score=NULL, risk_route=NULL, recommendation=NULL,
            result_json=NULL, analyzed_at=UTC_TIMESTAMP(3), updated_at=UTC_TIMESTAMP(3)
          WHERE case_id=?`,
         [message, id],

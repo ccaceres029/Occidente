@@ -96,3 +96,12 @@ test('una identidad inconsistente genera alerta crítica y ruta de Cumplimiento'
   assert.equal(result.risk.route, 'CUMPLIMIENTO');
   assert.equal(result.insight.recommendation.decision, 'SUBSANATE');
 });
+
+test('descarta un resumen factual en inglés y conserva la recomendación en español', () => {
+  const payload = extraction();
+  payload.caseSummary = 'The client submitted documents and a contribution was made.';
+  const result = buildGeneratedCaseIntelligence('case-3', documents, payload, 'gemini-2.5-flash-lite');
+  assert.doesNotMatch(result.insight.executiveSummary, /\bThe client\b/iu);
+  assert.doesNotMatch(result.insight.recommendation.rationale.join(' '), /\binsufficient\b/iu);
+  assert.match(result.insight.executiveSummary, /Resultado determinístico/u);
+});

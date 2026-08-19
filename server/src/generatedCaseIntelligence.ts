@@ -13,7 +13,7 @@ import type {
   SourceOfFundsInsight,
 } from './types.js';
 
-export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.0.1';
+export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.0.2';
 
 export interface GeneratedIntelligenceDocument {
   id: string;
@@ -257,7 +257,7 @@ async function extractWithGemini(
     `Campos permitidos: ${ALLOWED_FIELDS.join(', ')}.`,
     'Para value usa texto tal como aparece. Para booleanos usa Si o No. Para montos incluye moneda cuando esté visible.',
     'evidence debe ser una cita breve del archivo y page la página donde se encontró. confidence va de 0 a 1.',
-    'caseSummary debe resumir solo hechos observados en máximo 90 palabras. No apruebes, rechaces ni asignes riesgo.',
+    'caseSummary debe estar en español profesional y resumir solo hechos observados en máximo 90 palabras. No apruebes, rechaces ni asignes riesgo.',
     `Manifiesto: ${JSON.stringify(manifest)}`,
   ].join('\n');
   const parts: Array<Record<string, unknown>> = [{ text: prompt }];
@@ -617,6 +617,16 @@ function recommendationFor(risk: RiskAssessment, anomalies: DocumentAnomaly[], c
     HUMAN_REVIEW: 'Revisión humana reforzada',
     CONTINUE: 'Continuar a decisión humana',
   };
+  const route = {
+    REVISION_ESTANDAR: 'revisión estándar',
+    REVISION_REFORZADA: 'revisión reforzada',
+    CUMPLIMIENTO: 'Cumplimiento',
+  }[risk.route];
+  const sourceAlignment = {
+    CONSISTENT: 'coherente',
+    REVIEW: 'requiere revisión',
+    INSUFFICIENT: 'insuficientemente respaldada',
+  }[sourceOfFunds.alignment];
   const nextSteps: CaseRecommendation['nextSteps'] = [];
   if (hasIdentityMismatch) nextSteps.push({ order: 1, owner: 'Control documental', action: 'Conciliar identidad y nombre contra los documentos fuente.', reason: 'Existe una diferencia en un dato crítico.' });
   if (sourceOfFunds.alignment !== 'CONSISTENT') nextSteps.push({ order: nextSteps.length + 1, owner: 'Analista de Afiliaciones', action: 'Validar la procedencia de fondos y la capacidad económica.', reason: sourceOfFunds.explanation });
@@ -629,8 +639,8 @@ function recommendationFor(risk: RiskAssessment, anomalies: DocumentAnomaly[], c
     humanDecisionRequired: true,
     rationale: [
       `${anomalies.length} alerta(s) explicable(s), ${anomalies.filter((item) => item.severity === 'high').length} de prioridad alta.`,
-      `Riesgo ${risk.level.toLowerCase()} (${risk.score}/100), ruta ${risk.route.replaceAll('_', ' ').toLowerCase()}.`,
-      `Procedencia de fondos: ${sourceOfFunds.alignment.toLowerCase()}.`,
+      `Riesgo ${risk.level.toLowerCase()} (${risk.score}/100), ruta ${route}.`,
+      `Procedencia de fondos: ${sourceAlignment}.`,
     ],
     nextSteps,
   };
@@ -657,7 +667,10 @@ export function buildGeneratedCaseIntelligence(
   const matching = consistency.filter((item) => item.verdict === 'MATCH').length;
   const manualMinutes = normalized.documents.reduce((sum, document) => sum + 2 + document.pages * 0.8, 0);
   const automatedSeconds = Math.round((2 + normalized.documents.length * 0.7 + normalized.fields.length * 0.08) * 10) / 10;
-  const caseSummary = cleanText(extraction.caseSummary, 900);
+  const rawCaseSummary = cleanText(extraction.caseSummary, 900);
+  const caseSummary = /\b(?:the|client|submitted|provided|documents|indicates|resident|citizen|contribution|was made)\b/iu.test(rawCaseSummary)
+    ? ''
+    : rawCaseSummary;
   const stableFingerprint = fingerprint(documents);
   return {
     risk,
