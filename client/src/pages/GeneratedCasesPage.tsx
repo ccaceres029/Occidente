@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowRight, CalendarDays, FileStack, FolderKanban, Mail, Search } from 'lucide-react';
+import { ArrowRight, CalendarDays, FileStack, FolderKanban, Mail, Search, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import { Badge, EmptyState, ErrorState, LoadingState } from '../components/ui';
-import type { GeneratedCaseSummary } from '../types';
+import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
+import type { AuthUser, GeneratedCaseSummary } from '../types';
 
 function dateLabel(value: string, withTime = false): string {
   return new Intl.DateTimeFormat('es-HN', {
@@ -13,11 +13,14 @@ function dateLabel(value: string, withTime = false): string {
   }).format(new Date(value));
 }
 
-export default function GeneratedCasesPage() {
+export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthUser }) {
   const [items, setItems] = useState<GeneratedCaseSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState<GeneratedCaseSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [toast, setToast] = useState<{ message: string; tone?: 'success' | 'danger' } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -44,6 +47,24 @@ export default function GeneratedCasesPage() {
   if (error && !items.length) return <ErrorState message={error} onRetry={() => void load()} />;
 
   const documentTotal = items.reduce((sum, item) => sum + item.documentCount, 0);
+
+  const deleteCase = async () => {
+    if (!confirmDelete) return;
+    setDeleting(true);
+    try {
+      const result = await api.deleteGeneratedCase(confirmDelete.id);
+      setItems((current) => current.filter((item) => item.id !== confirmDelete.id));
+      setToast({ message: `${result.code} y sus registros relacionados fueron eliminados.` });
+      setConfirmDelete(null);
+    } catch (deleteError) {
+      setToast({
+        message: deleteError instanceof Error ? deleteError.message : 'No fue posible eliminar el caso.',
+        tone: 'danger',
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className="generated-cases-page">
@@ -78,11 +99,18 @@ export default function GeneratedCasesPage() {
               <div className="generated-list__sender"><strong>{item.senderName || 'Remitente'}</strong><small>{item.senderEmail || 'Sin dirección disponible'}</small></div>
               <time dateTime={item.receivedAt}>{dateLabel(item.receivedAt, true)}</time>
               <Badge tone={item.documentCount ? 'success' : 'neutral'}><FileStack size={12} /> {item.documentCount}</Badge>
-              <Link to={`/casos-generados/${item.id}`} aria-label={`Abrir ${item.code}`}><ArrowRight size={17} /></Link>
+              <div className="generated-list__actions">
+                <Link to={`/casos-generados/${item.id}`} title="Abrir caso" aria-label={`Abrir ${item.code}`}><ArrowRight size={17} /></Link>
+                {currentUser.role === 'ADMIN' && <button className="icon-button row-delete-button" type="button" title="Eliminar caso" aria-label={`Eliminar ${item.code}`} onClick={() => setConfirmDelete(item)}><Trash2 size={16} /></button>}
+              </div>
             </article>
           ))}
         </section>
       )}
+      <Modal open={Boolean(confirmDelete)} title="Eliminar caso en cascada" description="Esta acción es irreversible y está restringida a administradores." onClose={() => !deleting && setConfirmDelete(null)}>
+        {confirmDelete && <div className="cascade-delete"><Trash2 size={28} /><div><p>Se eliminará <strong>{confirmDelete.code}</strong> junto con:</p><ul><li>El registro del correo recibido</li><li>Los {confirmDelete.documentCount} documentos relacionados</li><li>La carpeta completa del caso en S3</li></ul></div><footer><Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancelar</Button><Button variant="danger" loading={deleting} onClick={() => void deleteCase()}>Eliminar definitivamente</Button></footer></div>}
+      </Modal>
+      {toast && <Toast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
   );
 }

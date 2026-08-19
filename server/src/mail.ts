@@ -384,6 +384,41 @@ export class MailService {
     }
   }
 
+  async deleteIncomingRequest(id: string): Promise<{ caseCode?: string; deletedObjects: number } | undefined> {
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.query<(RowDataPacket & { id: string; case_code: string | null })[]>(
+        `SELECT incoming.id, gc.code AS case_code
+         FROM incoming_requests incoming
+         LEFT JOIN generated_cases gc ON gc.incoming_request_id=incoming.id
+         WHERE incoming.id=? LIMIT 1 FOR UPDATE`,
+        [id],
+      );
+      const row = rows[0];
+      if (!row) {
+        await connection.rollback();
+        return undefined;
+      }
+      let deletedObjects = 0;
+      if (row.case_code) {
+        if (!this.objectStorage) throw new Error('El almacenamiento S3 no está configurado.');
+        deletedObjects = await this.objectStorage.deleteCase(row.case_code);
+      }
+      await connection.query('DELETE FROM incoming_requests WHERE id=?', [row.id]);
+      await connection.commit();
+      return {
+        ...(row.case_code ? { caseCode: row.case_code } : {}),
+        deletedObjects,
+      };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
   async syncIncoming(limit = 50): Promise<{ imported: number; generated: number; documents: number; total: number }> {
     if (this.syncing) return { imported: 0, generated: 0, documents: 0, total: (await this.listIncoming(250)).length };
     this.syncing = true;

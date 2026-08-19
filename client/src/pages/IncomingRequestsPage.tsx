@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock3, Inbox, Mail, Paperclip, RefreshCw, Search } from 'lucide-react';
+import { Clock3, Inbox, Mail, Paperclip, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import { Badge, Button, EmptyState, ErrorState, LoadingState, Toast } from '../components/ui';
-import type { IncomingRequest } from '../types';
+import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
+import type { AuthUser, IncomingRequest } from '../types';
 
 function receivedLabel(value: string): string {
   return new Intl.DateTimeFormat('es-HN', {
@@ -13,13 +13,15 @@ function receivedLabel(value: string): string {
   }).format(new Date(value));
 }
 
-export default function IncomingRequestsPage() {
+export default function IncomingRequestsPage({ currentUser }: { currentUser: AuthUser }) {
   const [items, setItems] = useState<IncomingRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; tone?: 'success' | 'danger' } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<IncomingRequest | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -40,13 +42,35 @@ export default function IncomingRequestsPage() {
     try {
       const result = await api.syncIncomingRequests();
       await load();
-      setToast(result.generated
+      setToast({ message: result.generated
         ? `${result.generated} caso(s) generado(s) con ${result.documents} documento(s).`
-        : result.imported ? `${result.imported} solicitud(es) nueva(s) recibida(s).` : 'La bandeja está al día.');
+        : result.imported ? `${result.imported} solicitud(es) nueva(s) recibida(s).` : 'La bandeja está al día.' });
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : 'No fue posible sincronizar el correo.');
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const deleteRequest = async () => {
+    if (!confirmDelete) return;
+    setDeleting(true);
+    try {
+      const result = await api.deleteIncomingRequest(confirmDelete.id);
+      setItems((current) => current.filter((item) => item.id !== confirmDelete.id));
+      setToast({
+        message: result.caseCode
+          ? `${result.caseCode} y sus registros relacionados fueron eliminados.`
+          : 'La solicitud entrante fue eliminada.',
+      });
+      setConfirmDelete(null);
+    } catch (deleteError) {
+      setToast({
+        message: deleteError instanceof Error ? deleteError.message : 'No fue posible eliminar la solicitud.',
+        tone: 'danger',
+      });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -84,7 +108,7 @@ export default function IncomingRequestsPage() {
         <EmptyState icon={<Mail size={25} />} title={items.length ? 'No hay coincidencias' : 'Aún no hay solicitudes recibidas'} body={items.length ? 'Ajusta el término de búsqueda para revisar otros mensajes.' : 'Usa “Recibir ahora” para consultar la cuenta IMAP configurada.'} />
       ) : (
         <section className={`incoming-list ${loading ? 'is-refreshing' : ''}`} aria-busy={loading}>
-          <header className="incoming-list__header"><span>Remitente y solicitud</span><span>Recepción</span><span>Estado</span></header>
+          <header className="incoming-list__header"><span>Remitente y solicitud</span><span>Recepción</span><span>Estado</span><span /></header>
           {visible.map((item) => (
             <article className="incoming-row" key={item.id}>
               <div className="incoming-row__avatar">{(item.senderName || item.senderEmail || 'S').slice(0, 1).toUpperCase()}</div>
@@ -97,11 +121,19 @@ export default function IncomingRequestsPage() {
               {item.caseId && item.caseCode
                 ? <Link className="incoming-case-link" to={`/casos-generados/${item.caseId}`}>{item.caseCode}</Link>
                 : <Badge tone={item.status === 'NEW' ? 'warning' : 'neutral'}>{item.status === 'NEW' ? 'Nueva' : item.status}</Badge>}
+              {currentUser.role === 'ADMIN' && (
+                <button className="icon-button row-delete-button" type="button" title="Eliminar registro" aria-label={`Eliminar ${item.caseCode || item.subject}`} onClick={() => setConfirmDelete(item)}>
+                  <Trash2 size={16} />
+                </button>
+              )}
             </article>
           ))}
         </section>
       )}
-      {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
+      <Modal open={Boolean(confirmDelete)} title="Eliminar registro en cascada" description="Esta acción es irreversible y está restringida a administradores." onClose={() => !deleting && setConfirmDelete(null)}>
+        {confirmDelete && <div className="cascade-delete"><Trash2 size={28} /><div><p>Se eliminará <strong>{confirmDelete.caseCode || confirmDelete.subject}</strong> junto con:</p><ul><li>El registro del correo recibido</li>{confirmDelete.caseCode && <li>El caso generado y sus documentos</li>}{confirmDelete.caseCode && <li>La carpeta completa del caso en S3</li>}</ul></div><footer><Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancelar</Button><Button variant="danger" loading={deleting} onClick={() => void deleteRequest()}>Eliminar definitivamente</Button></footer></div>}
+      </Modal>
+      {toast && <Toast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
   );
 }

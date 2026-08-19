@@ -661,6 +661,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     return mailService.syncIncoming();
   });
 
+  app.delete<{ Params: CaseParams }>('/api/incoming-requests/:id', async (request) => {
+    const actor = requireAdmin(request);
+    if (!mailService) throw new WorkflowError('La bandeja requiere la conexión MySQL.', 503);
+    try {
+      const result = await mailService.deleteIncomingRequest(request.params.id);
+      if (!result) throw new WorkflowError('No se encontró la solicitud entrante.', 404);
+      return { ok: true, ...result, deletedBy: actor.displayName };
+    } catch (error) {
+      if (error instanceof WorkflowError) throw error;
+      app.log.error({ error, incomingRequestId: request.params.id }, 'No se pudo eliminar la solicitud en cascada');
+      throw new WorkflowError('No fue posible completar la eliminación en cascada.', 502);
+    }
+  });
+
   app.get<{ Querystring: { limit?: string } }>('/api/generated-cases', async (request) => {
     if (!mailService) throw new WorkflowError('Los casos generados requieren la conexión MySQL.', 503);
     return { items: await mailService.listGeneratedCases(Number(request.query.limit || 250)) };

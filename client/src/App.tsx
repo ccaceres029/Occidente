@@ -52,8 +52,8 @@ export default function App() {
         <Route path="casos/nuevo" element={<NewCasePage />} />
         <Route path="casos/:id" element={<CaseDetailPage />} />
         <Route path="politicas" element={<PoliciesPage />} />
-        <Route path="solicitudes" element={<IncomingRequestsPage />} />
-        <Route path="casos-generados" element={<GeneratedCasesPage />} />
+        <Route path="solicitudes" element={<IncomingRequestsPage currentUser={user} />} />
+        <Route path="casos-generados" element={<GeneratedCasesPage currentUser={user} />} />
         <Route path="casos-generados/:id" element={<GeneratedCaseDetailPage currentUser={user} />} />
         <Route path="configuracion/correo" element={<EmailSettingsPage />} />
         <Route path="configuracion/usuarios" element={user.role === 'ADMIN' ? <UsersPage currentUser={user} /> : <Navigate to="/" replace />} />
