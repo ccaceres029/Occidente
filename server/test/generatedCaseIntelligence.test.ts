@@ -105,3 +105,20 @@ test('descarta un resumen factual en inglés y conserva la recomendación en esp
   assert.doesNotMatch(result.insight.recommendation.rationale.join(' '), /\binsufficient\b/iu);
   assert.match(result.insight.executiveSummary, /Resultado determinístico/u);
 });
+
+test('no confunde ciudadanía estadounidense con condición PEP', () => {
+  const payload = extraction();
+  const fatca = payload.documents.find((document) => document.documentType === 'FATCA');
+  assert.ok(fatca);
+  const fatcaIndicator = fatca.fields.find((field) => field.field === 'fatcaPositive');
+  assert.ok(fatcaIndicator);
+  fatcaIndicator.value = 'Si';
+  fatcaIndicator.evidence = 'Es RESIDENTE de los EE.UU. (X)';
+  fatca.fields.push({
+    field: 'pepDeclared', label: 'Condición PEP', value: 'Si', confidence: 0.99,
+    page: 1, evidence: 'Es CIUDADANO O NACIONALIZADO de los EE.UU. (X)', status: 'EXTRACTED',
+  });
+  const result = buildGeneratedCaseIntelligence('case-4', documents, payload, 'gemini-2.5-flash-lite');
+  assert.ok(result.insight.anomalies.some((item) => item.ruleCode === 'FATCA_POSITIVE'));
+  assert.ok(!result.insight.anomalies.some((item) => item.ruleCode === 'PEP_DECLARED'));
+});

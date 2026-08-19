@@ -13,7 +13,7 @@ import type {
   SourceOfFundsInsight,
 } from './types.js';
 
-export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.0.2';
+export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.0.3';
 
 export interface GeneratedIntelligenceDocument {
   id: string;
@@ -172,6 +172,14 @@ const parsedValue = (field: string, value: string): string | number | boolean | 
   return value || null;
 };
 
+const fieldHasValidEvidence = (field: string, documentType: string, evidence: string): boolean => {
+  const normalized = evidence.normalize('NFD').replaceAll(/[\u0300-\u036f]/gu, '').toLocaleLowerCase('es-HN');
+  if (field === 'fatcaPositive') return documentType === 'FATCA';
+  if (field === 'pepDeclared') return /\bpep\b|persona\s+expuesta\s+politic/u.test(normalized);
+  if (field === 'apnfdDeclared') return /\bapnfd\b|actividad\s+no\s+financiera/u.test(normalized);
+  return true;
+};
+
 function fingerprint(documents: GeneratedIntelligenceDocument[]): string {
   return createHash('sha256').update(JSON.stringify({
     version: GENERATED_CASE_INTELLIGENCE_VERSION,
@@ -256,6 +264,8 @@ async function extractWithGemini(
     `Tipos permitidos: ${ALLOWED_DOCUMENT_TYPES.join(', ')}.`,
     `Campos permitidos: ${ALLOWED_FIELDS.join(', ')}.`,
     'Para value usa texto tal como aparece. Para booleanos usa Si o No. Para montos incluye moneda cuando esté visible.',
+    'pepDeclared solo puede extraerse cuando el documento menciona explícitamente PEP o Persona Expuesta Políticamente; ciudadanía o residencia estadounidense no significan PEP.',
+    'fatcaPositive solo puede extraerse de la autocertificación FATCA y es verdadero si al menos una condición FATCA aplicable está marcada afirmativamente.',
     'evidence debe ser una cita breve del archivo y page la página donde se encontró. confidence va de 0 a 1.',
     'caseSummary debe estar en español profesional y resumir solo hechos observados en máximo 90 palabras. No apruebes, rechaces ni asignes riesgo.',
     `Manifiesto: ${JSON.stringify(manifest)}`,
@@ -340,6 +350,8 @@ function normalizeExtraction(
       const field = raw as GeminiField;
       const key = cleanText(field.field, 64);
       if (!ALLOWED_FIELDS.includes(key) || seenFields.has(key)) continue;
+      const evidenceText = cleanText(field.evidence, 300);
+      if (!fieldHasValidEvidence(key, documentType, evidenceText)) continue;
       seenFields.add(key);
       const valueText = cleanText(field.value, 300);
       const confidenceValue = clamp(field.confidence, 0.5);
@@ -356,7 +368,7 @@ function normalizeExtraction(
         value: parsedValue(key, valueText),
         confidence: confidenceValue,
         page: Math.max(1, Math.min(pages, Math.trunc(Number(field.page) || 1))),
-        evidence: cleanText(field.evidence, 300) || 'Evidencia textual no proporcionada.',
+        evidence: evidenceText || 'Evidencia textual no proporcionada.',
         evidenceLocation: 'gemini-pdf-page',
         status,
         origin: 'gemini-document-extraction',
