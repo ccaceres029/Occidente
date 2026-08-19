@@ -13,7 +13,7 @@ import type {
   SourceOfFundsInsight,
 } from './types.js';
 
-export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.0.0';
+export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.0.1';
 
 export interface GeneratedIntelligenceDocument {
   id: string;
@@ -121,6 +121,25 @@ const normalizeComparable = (value: unknown): string =>
     .replaceAll(/[\u0300-\u036f]/gu, '')
     .replaceAll(/[^a-zA-Z0-9]/gu, '')
     .toLocaleLowerCase('es-HN');
+
+const normalizeConsistencyValue = (field: string, value: unknown): string => {
+  if (field === 'fullName') {
+    return String(value ?? '')
+      .normalize('NFD')
+      .replaceAll(/[\u0300-\u036f]/gu, '')
+      .toLocaleLowerCase('es-HN')
+      .split(/[^a-z]+/u)
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right, 'es-HN'))
+      .join('');
+  }
+  if (field === 'nationality' || field === 'residenceCountry') {
+    const normalized = normalizeComparable(value);
+    if (['hnd', 'honduras', 'hondurena', 'hondureno'].includes(normalized)) return 'honduras';
+    if (['usa', 'us', 'eua', 'estadosunidos', 'estadounidense'].includes(normalized)) return 'estadosunidos';
+  }
+  return normalizeComparable(value);
+};
 
 const parseAmount = (value: string): number => {
   const compact = value.replaceAll(/[^0-9.,-]/gu, '');
@@ -356,7 +375,7 @@ function buildConsistency(
     const sources = extractedFields
       .filter((item) => item.field === field && expectedTypes.includes(item.documentType) && item.value !== null && item.value !== '')
       .map(({ documentType, documentId, value, confidence }) => ({ documentType, documentId, value, confidence }));
-    const uniqueValues = new Set(sources.map((source) => normalizeComparable(source.value)));
+    const uniqueValues = new Set(sources.map((source) => normalizeConsistencyValue(field, source.value)));
     const expectedSourceCount = presentTypes.size;
     let verdict: ConsistencyCheck['verdict'] = 'REVIEW';
     let explanation = `${label}: solo hay una fuente verificable; requiere confirmación humana.`;

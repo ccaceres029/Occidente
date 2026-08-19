@@ -33,9 +33,9 @@ const valuesByType: Record<string, Array<[string, string]>> = {
   ],
   IDENTITY: [
     ['fullName', 'Jasmin Isabel Lopez Giron'], ['idNumber', '0801-2000-18719'],
-    ['nationality', 'Hondurena'], ['city', 'Tegucigalpa'],
+    ['nationality', 'HND'], ['city', 'Tegucigalpa'],
   ],
-  RTN: [['fullName', 'Jasmin Isabel Lopez Giron'], ['taxId', '08011999123456']],
+  RTN: [['fullName', 'LOPEZ GIRON, JASMIN ISABEL'], ['taxId', '08011999123456']],
   CONTRIBUTION_RECEIPT: [
     ['contributionAmount', 'HNL 250.00'], ['currency', 'HNL'], ['sourceOfFunds', 'Remuneracion salarial'],
   ],

@@ -182,6 +182,7 @@ interface GeneratedCaseRow extends RowDataPacket {
   analyzed_at: Date | null;
   intelligence_status: GeneratedIntelligenceStatus['status'] | null;
   intelligence_model: string | null;
+  intelligence_engine_version: string | null;
   intelligence_result: DocumentIntelligenceInsight | string | null;
   intelligence_error: string | null;
   intelligence_analyzed_at: Date | null;
@@ -492,6 +493,7 @@ export class MailService {
         analysis.summary AS analysis_summary, analysis.model AS analysis_model,
         analysis.analysis_version, analysis.analyzed_at,
         intelligence.status AS intelligence_status, intelligence.model AS intelligence_model,
+        intelligence.engine_version AS intelligence_engine_version,
         NULL AS intelligence_result, intelligence.error_message AS intelligence_error,
         intelligence.analyzed_at AS intelligence_analyzed_at,
         intelligence.risk_level, intelligence.risk_score, intelligence.risk_route
@@ -503,7 +505,8 @@ export class MailService {
     );
     const generatedCases = rows.map(publicGeneratedCase);
     for (const row of rows.filter((item) => item.analysis_status === 'COMPLETE' &&
-      (!item.intelligence_status || item.intelligence_status === 'ANALYZING')).slice(0, 3)) {
+      (!item.intelligence_status || item.intelligence_status === 'ANALYZING' ||
+        item.intelligence_engine_version !== GENERATED_CASE_INTELLIGENCE_VERSION)).slice(0, 3)) {
       void this.ensureGeneratedCaseIntelligence(row.id, false).catch(() => undefined);
     }
     return generatedCases;
@@ -522,6 +525,7 @@ export class MailService {
         analysis.summary AS analysis_summary, analysis.model AS analysis_model,
         analysis.analysis_version, analysis.analyzed_at,
         intelligence.status AS intelligence_status, intelligence.model AS intelligence_model,
+        intelligence.engine_version AS intelligence_engine_version,
         intelligence.result_json AS intelligence_result, intelligence.error_message AS intelligence_error,
         intelligence.analyzed_at AS intelligence_analyzed_at,
         intelligence.risk_level, intelligence.risk_score, intelligence.risk_route
