@@ -72,6 +72,32 @@ export interface GeneratedCaseDocument {
   createdAt: string;
 }
 
+export interface DocumentCompletenessItem {
+  requirementType: string;
+  label: string;
+  status: 'PRESENT' | 'MISSING';
+  matchedDocumentId?: string;
+  confidence: number;
+  reason: string;
+  policyRef: string;
+}
+
+export interface DocumentCompletenessAnalysis {
+  status: 'COMPLETE' | 'MISSING_DOCUMENTS';
+  provider: 'gemini' | 'deterministic';
+  geminiConfigured: boolean;
+  completenessPercent: number;
+  expectedCount: number;
+  receivedCount: number;
+  missingCount: number;
+  unclassifiedCount: number;
+  summary: string;
+  model?: string;
+  version: string;
+  analyzedAt: string;
+  items: DocumentCompletenessItem[];
+}
+
 export interface GeneratedCaseSummary {
   id: string;
   code: string;
@@ -82,6 +108,7 @@ export interface GeneratedCaseSummary {
   receivedAt: string;
   documentCount: number;
   createdAt: string;
+  documentAnalysis?: DocumentCompletenessAnalysis;
 }
 
 export interface GeneratedCaseDetail extends GeneratedCaseSummary {

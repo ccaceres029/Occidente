@@ -32,6 +32,7 @@ import {
   documentIntelligenceFingerprint,
 } from './documentIntelligence.js';
 import { DOCUMENT_PREVIEW_MAX_PAGE, DocumentPreviewCache } from './documentPreview.js';
+import { inlineContentDisposition } from './httpHeaders.js';
 import { applyVerifiedPdfEvidence, PdfEvidenceLocator } from './pdfEvidenceLocator.js';
 import { STAGE_LABELS, STATUS_LABELS, STATUS_PROGRESS } from './labels.js';
 import { MailService, type MailSettingsInput } from './mail.js';
@@ -459,7 +460,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     : options.objectStorageConfig;
   const objectStorage = objectStorageConfig ? new ObjectStorage(objectStorageConfig) : undefined;
   const mailService = mysqlStore
-    ? new MailService(mysqlStore.databasePool(), mailRuntime.credentialsKey, objectStorage)
+    ? new MailService(mysqlStore.databasePool(), mailRuntime.credentialsKey, objectStorage, geminiConfig)
     : undefined;
   const authEnabled = Boolean(mysqlStore && !options.authDisabled);
   await store.initialize();
@@ -687,6 +688,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     return { case: generatedCase };
   });
 
+  app.post<{ Params: CaseParams }>('/api/generated-cases/:id/analyze', async (request) => {
+    if (!mailService) throw new WorkflowError('El análisis documental requiere la conexión MySQL.', 503);
+    const analysis = await mailService.analyzeGeneratedCase(request.params.id, true);
+    if (!analysis) throw new WorkflowError('No se encontró el caso generado.', 404);
+    const generatedCase = await mailService.getGeneratedCase(request.params.id);
+    if (!generatedCase) throw new WorkflowError('No se encontró el caso generado.', 404);
+    return { case: generatedCase };
+  });
+
   app.get<{ Params: GeneratedDocumentParams }>(
     '/api/generated-cases/:id/documents/:documentId/content',
     async (request, reply) => {
@@ -694,11 +704,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       try {
         const result = await mailService.getGeneratedDocument(request.params.id, request.params.documentId);
         if (!result) throw new WorkflowError('No se encontró el documento del caso.', 404);
-        const safeFilename = result.document.filename.replaceAll(/[\r\n"]/gu, '_');
         reply
           .header('content-type', result.document.contentType)
           .header('content-length', String(result.content.length))
-          .header('content-disposition', `inline; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(safeFilename)}`)
+          .header('content-disposition', inlineContentDisposition(result.document.filename))
           .header('cache-control', 'private, max-age=300')
           .header('x-document-origin', 's3-private');
         return reply.send(result.content);

@@ -98,6 +98,8 @@ export const api = {
     request<{ ok: true; caseCode?: string; deletedObjects: number }>(`/incoming-requests/${id}`, { method: 'DELETE' }),
   generatedCases: () => request<{ items: GeneratedCaseSummary[] }>('/generated-cases'),
   generatedCase: (id: string) => request<{ case: GeneratedCaseDetail }>(`/generated-cases/${id}`),
+  analyzeGeneratedCase: (id: string) =>
+    request<{ case: GeneratedCaseDetail }>(`/generated-cases/${id}/analyze`, { method: 'POST' }),
   generatedDocumentUrl: (caseId: string, documentId: string) =>
     `${API_ROOT}/generated-cases/${caseId}/documents/${documentId}/content`,
   deleteGeneratedCase: (id: string) =>

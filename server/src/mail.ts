@@ -3,6 +3,13 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser, type Attachment, type ParsedMail } from 'mailparser';
 import nodemailer from 'nodemailer';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import type { GeminiConfig } from './config.js';
+import {
+  analyzeDocumentCompleteness,
+  DOCUMENT_COMPLETENESS_VERSION,
+  type DocumentCompletenessAnalysis,
+  type DocumentCompletenessItem,
+} from './documentCompleteness.js';
 import { ObjectStorage } from './objectStorage.js';
 
 export interface MailSettings {
@@ -71,6 +78,7 @@ export interface GeneratedCaseSummary {
   receivedAt: string;
   documentCount: number;
   createdAt: string;
+  documentAnalysis?: DocumentCompletenessAnalysis;
 }
 
 export interface GeneratedCaseDetail extends GeneratedCaseSummary {
@@ -123,6 +131,18 @@ interface GeneratedCaseRow extends RowDataPacket {
   received_at: Date;
   document_count: number;
   created_at: Date;
+  analysis_status: DocumentCompletenessAnalysis['status'] | null;
+  analysis_provider: DocumentCompletenessAnalysis['provider'] | null;
+  gemini_configured: number | null;
+  completeness_percent: number | null;
+  expected_count: number | null;
+  received_count: number | null;
+  missing_count: number | null;
+  unclassified_count: number | null;
+  analysis_summary: string | null;
+  analysis_model: string | null;
+  analysis_version: string | null;
+  analyzed_at: Date | null;
 }
 
 interface GeneratedDocumentRow extends RowDataPacket {
@@ -135,6 +155,31 @@ interface GeneratedDocumentRow extends RowDataPacket {
   s3_bucket: string;
   s3_key: string;
   created_at: Date;
+}
+
+interface AnalysisItemRow extends RowDataPacket {
+  requirement_type: string;
+  label: string;
+  status: DocumentCompletenessItem['status'];
+  matched_document_id: string | null;
+  confidence: string | number;
+  reason: string;
+  policy_ref: string;
+}
+
+interface StoredAnalysisRow extends RowDataPacket {
+  status: DocumentCompletenessAnalysis['status'];
+  provider: DocumentCompletenessAnalysis['provider'];
+  gemini_configured: number;
+  completeness_percent: number;
+  expected_count: number;
+  received_count: number;
+  missing_count: number;
+  unclassified_count: number;
+  summary: string;
+  model: string | null;
+  analysis_version: string;
+  analyzed_at: Date;
 }
 
 function publicSettings(row: SettingsRow): MailSettings {
@@ -176,7 +221,7 @@ function publicIncoming(row: IncomingRow): IncomingRequest {
 }
 
 function publicGeneratedCase(row: GeneratedCaseRow): GeneratedCaseSummary {
-  return {
+  const generatedCase: GeneratedCaseSummary = {
     id: row.id,
     code: row.code,
     status: row.status,
@@ -187,6 +232,24 @@ function publicGeneratedCase(row: GeneratedCaseRow): GeneratedCaseSummary {
     documentCount: Number(row.document_count),
     createdAt: row.created_at.toISOString(),
   };
+  if (row.analysis_status && row.analysis_provider && row.analyzed_at) {
+    generatedCase.documentAnalysis = {
+      status: row.analysis_status,
+      provider: row.analysis_provider,
+      geminiConfigured: Boolean(row.gemini_configured),
+      completenessPercent: Number(row.completeness_percent),
+      expectedCount: Number(row.expected_count),
+      receivedCount: Number(row.received_count),
+      missingCount: Number(row.missing_count),
+      unclassifiedCount: Number(row.unclassified_count),
+      summary: row.analysis_summary || '',
+      ...(row.analysis_model ? { model: row.analysis_model } : {}),
+      version: row.analysis_version || DOCUMENT_COMPLETENESS_VERSION,
+      analyzedAt: row.analyzed_at.toISOString(),
+      items: [],
+    };
+  }
+  return generatedCase;
 }
 
 function publicGeneratedDocument(row: GeneratedDocumentRow): GeneratedCaseDocument {
@@ -240,6 +303,7 @@ export class MailService {
     private readonly pool: Pool,
     private readonly credentialsKey?: Buffer,
     private readonly objectStorage?: ObjectStorage,
+    private readonly geminiConfig: GeminiConfig = { model: 'gemini-2.5-flash-lite', configured: false, source: 'none' },
   ) {}
 
   get storageConfigured(): boolean {
@@ -307,10 +371,15 @@ export class MailService {
     const [rows] = await this.pool.query<GeneratedCaseRow[]>(
       `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
         gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
-        gc.created_at, COUNT(documents.id) AS document_count
+        gc.created_at,
+        (SELECT COUNT(*) FROM generated_case_documents documents WHERE documents.case_id=gc.id) AS document_count,
+        analysis.status AS analysis_status, analysis.provider AS analysis_provider,
+        analysis.gemini_configured, analysis.completeness_percent, analysis.expected_count,
+        analysis.received_count, analysis.missing_count, analysis.unclassified_count,
+        analysis.summary AS analysis_summary, analysis.model AS analysis_model,
+        analysis.analysis_version, analysis.analyzed_at
        FROM generated_cases gc
-       LEFT JOIN generated_case_documents documents ON documents.case_id=gc.id
-       GROUP BY gc.id
+       LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
        ORDER BY gc.received_at DESC, gc.code DESC LIMIT ?`,
       [safeLimit],
     );
@@ -318,13 +387,20 @@ export class MailService {
   }
 
   async getGeneratedCase(id: string): Promise<GeneratedCaseDetail | undefined> {
+    await this.analyzeGeneratedCase(id, false);
     const [caseRows] = await this.pool.query<GeneratedCaseRow[]>(
       `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
         gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
-        gc.created_at, COUNT(documents.id) AS document_count
+        gc.created_at,
+        (SELECT COUNT(*) FROM generated_case_documents documents WHERE documents.case_id=gc.id) AS document_count,
+        analysis.status AS analysis_status, analysis.provider AS analysis_provider,
+        analysis.gemini_configured, analysis.completeness_percent, analysis.expected_count,
+        analysis.received_count, analysis.missing_count, analysis.unclassified_count,
+        analysis.summary AS analysis_summary, analysis.model AS analysis_model,
+        analysis.analysis_version, analysis.analyzed_at
        FROM generated_cases gc
-       LEFT JOIN generated_case_documents documents ON documents.case_id=gc.id
-       WHERE gc.id=? GROUP BY gc.id`,
+       LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
+       WHERE gc.id=? LIMIT 1`,
       [id],
     );
     const row = caseRows[0];
@@ -335,11 +411,92 @@ export class MailService {
        FROM generated_case_documents WHERE case_id=? ORDER BY created_at, filename`,
       [id],
     );
+    const [analysisItemRows] = await this.pool.query<AnalysisItemRow[]>(
+      `SELECT requirement_type, label, status, matched_document_id, confidence, reason, policy_ref
+       FROM generated_case_document_analysis_items
+       WHERE case_id=? ORDER BY created_at, requirement_type`,
+      [id],
+    );
+    const generatedCase = publicGeneratedCase(row);
+    if (generatedCase.documentAnalysis) {
+      generatedCase.documentAnalysis.items = analysisItemRows.map((item) => ({
+        requirementType: item.requirement_type,
+        label: item.label,
+        status: item.status,
+        ...(item.matched_document_id ? { matchedDocumentId: item.matched_document_id } : {}),
+        confidence: Number(item.confidence),
+        reason: item.reason,
+        policyRef: item.policy_ref,
+      }));
+    }
     return {
-      ...publicGeneratedCase(row),
+      ...generatedCase,
       incomingRequestId: row.incoming_request_id,
       documents: documentRows.map(publicGeneratedDocument),
     };
+  }
+
+  async analyzeGeneratedCase(id: string, force = true): Promise<DocumentCompletenessAnalysis | undefined> {
+    if (!force) {
+      const stored = await this.storedDocumentAnalysis(id);
+      if (stored?.version === DOCUMENT_COMPLETENESS_VERSION) return stored;
+    }
+    const [caseRows] = await this.pool.query<RowDataPacket[]>('SELECT id FROM generated_cases WHERE id=? LIMIT 1', [id]);
+    if (!caseRows[0]) return undefined;
+    const [documentRows] = await this.pool.query<GeneratedDocumentRow[]>(
+      `SELECT id, case_id, filename, content_type, size_bytes, checksum_sha256,
+        s3_bucket, s3_key, created_at
+       FROM generated_case_documents WHERE case_id=? ORDER BY created_at, filename`,
+      [id],
+    );
+    const analysis = await analyzeDocumentCompleteness(
+      documentRows.map((document) => ({
+        id: document.id,
+        filename: document.filename,
+        contentType: document.content_type,
+        sizeBytes: Number(document.size_bytes),
+      })),
+      this.geminiConfig,
+    );
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.query(
+        `INSERT INTO generated_case_document_analyses
+          (case_id, status, provider, gemini_configured, completeness_percent, expected_count,
+           received_count, missing_count, unclassified_count, summary, model, analysis_version,
+           analyzed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))
+         ON DUPLICATE KEY UPDATE status=VALUES(status), provider=VALUES(provider),
+           gemini_configured=VALUES(gemini_configured), completeness_percent=VALUES(completeness_percent),
+           expected_count=VALUES(expected_count), received_count=VALUES(received_count),
+           missing_count=VALUES(missing_count), unclassified_count=VALUES(unclassified_count),
+           summary=VALUES(summary), model=VALUES(model), analysis_version=VALUES(analysis_version),
+           analyzed_at=VALUES(analyzed_at), updated_at=UTC_TIMESTAMP(3)`,
+        [id, analysis.status, analysis.provider, analysis.geminiConfigured,
+          analysis.completenessPercent, analysis.expectedCount, analysis.receivedCount,
+          analysis.missingCount, analysis.unclassifiedCount, analysis.summary,
+          analysis.model || null, analysis.version, new Date(analysis.analyzedAt)],
+      );
+      await connection.query('DELETE FROM generated_case_document_analysis_items WHERE case_id=?', [id]);
+      for (const item of analysis.items) {
+        await connection.query(
+          `INSERT INTO generated_case_document_analysis_items
+            (id, case_id, requirement_type, label, status, matched_document_id,
+             confidence, reason, policy_ref, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))`,
+          [randomUUID(), id, item.requirementType, item.label, item.status,
+            item.matchedDocumentId || null, item.confidence, item.reason, item.policyRef],
+        );
+      }
+      await connection.commit();
+      return analysis;
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
 
   async getGeneratedDocument(caseId: string, documentId: string): Promise<{ document: GeneratedCaseDocument; content: Buffer } | undefined> {
@@ -507,18 +664,20 @@ export class MailService {
         const date = caseDate(row.received_at);
         const sequence = await this.nextDailySequence(connection, date);
         const code = `AFPC-${date.replaceAll('-', '')}-${String(sequence).padStart(5, '0')}`;
+        const generatedId = randomUUID();
         await connection.query(
           `INSERT INTO generated_cases
             (id, code, incoming_request_id, status, subject, sender_name, sender_email,
              received_at, created_at, updated_at)
            VALUES (?, ?, ?, 'RECEIVED', ?, ?, ?, ?, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
-          [randomUUID(), code, row.id, row.subject, row.sender_name, row.sender_email, row.received_at],
+          [generatedId, code, row.id, row.subject, row.sender_name, row.sender_email, row.received_at],
         );
         await connection.query(
           `UPDATE incoming_requests SET status='CASE_CREATED', updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
           [row.id],
         );
         await connection.commit();
+        await this.analyzeGeneratedCase(generatedId, true).catch(() => undefined);
         generated += 1;
       } catch (error) {
         await connection.rollback();
@@ -613,6 +772,7 @@ export class MailService {
         [incomingId],
       );
       await connection.commit();
+      await this.analyzeGeneratedCase(generatedId, true).catch(() => undefined);
       return { imported, generated: 1, documents: input.parsed.attachments.length };
     } catch (error) {
       await connection.rollback();
@@ -641,6 +801,47 @@ export class MailService {
       );
     }
     return next;
+  }
+
+  private async storedDocumentAnalysis(id: string): Promise<DocumentCompletenessAnalysis | undefined> {
+    const [rows] = await this.pool.query<StoredAnalysisRow[]>(
+      `SELECT status, provider, gemini_configured, completeness_percent, expected_count,
+        received_count, missing_count, unclassified_count, summary, model,
+        analysis_version, analyzed_at
+       FROM generated_case_document_analyses WHERE case_id=? LIMIT 1`,
+      [id],
+    );
+    const row = rows[0];
+    if (!row) return undefined;
+    const [itemRows] = await this.pool.query<AnalysisItemRow[]>(
+      `SELECT requirement_type, label, status, matched_document_id, confidence, reason, policy_ref
+       FROM generated_case_document_analysis_items
+       WHERE case_id=? ORDER BY created_at, requirement_type`,
+      [id],
+    );
+    return {
+      status: row.status,
+      provider: row.provider,
+      geminiConfigured: Boolean(row.gemini_configured),
+      completenessPercent: Number(row.completeness_percent),
+      expectedCount: Number(row.expected_count),
+      receivedCount: Number(row.received_count),
+      missingCount: Number(row.missing_count),
+      unclassifiedCount: Number(row.unclassified_count),
+      summary: row.summary,
+      ...(row.model ? { model: row.model } : {}),
+      version: row.analysis_version,
+      analyzedAt: row.analyzed_at.toISOString(),
+      items: itemRows.map((item) => ({
+        requirementType: item.requirement_type,
+        label: item.label,
+        status: item.status,
+        ...(item.matched_document_id ? { matchedDocumentId: item.matched_document_id } : {}),
+        confidence: Number(item.confidence),
+        reason: item.reason,
+        policyRef: item.policy_ref,
+      })),
+    };
   }
 
   private async settingsRow(): Promise<SettingsRow> {

@@ -290,6 +290,46 @@ export class MysqlStore implements CaseStore {
           REFERENCES generated_cases(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS generated_case_document_analyses (
+        case_id CHAR(36) PRIMARY KEY,
+        status VARCHAR(30) NOT NULL,
+        provider VARCHAR(30) NOT NULL,
+        gemini_configured BOOLEAN NOT NULL DEFAULT FALSE,
+        completeness_percent TINYINT UNSIGNED NOT NULL,
+        expected_count SMALLINT UNSIGNED NOT NULL,
+        received_count SMALLINT UNSIGNED NOT NULL,
+        missing_count SMALLINT UNSIGNED NOT NULL,
+        unclassified_count SMALLINT UNSIGNED NOT NULL,
+        summary VARCHAR(1000) NOT NULL,
+        model VARCHAR(100) NULL,
+        analysis_version VARCHAR(64) NOT NULL,
+        analyzed_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        CONSTRAINT fk_generated_analysis_case FOREIGN KEY (case_id)
+          REFERENCES generated_cases(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS generated_case_document_analysis_items (
+        id CHAR(36) PRIMARY KEY,
+        case_id CHAR(36) NOT NULL,
+        requirement_type VARCHAR(64) NOT NULL,
+        label VARCHAR(191) NOT NULL,
+        status VARCHAR(20) NOT NULL,
+        matched_document_id CHAR(36) NULL,
+        confidence DECIMAL(5,4) NOT NULL,
+        reason VARCHAR(500) NOT NULL,
+        policy_ref VARCHAR(191) NOT NULL,
+        created_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_generated_analysis_requirement (case_id, requirement_type),
+        INDEX idx_generated_analysis_status (case_id, status),
+        CONSTRAINT fk_generated_analysis_item_case FOREIGN KEY (case_id)
+          REFERENCES generated_cases(id) ON DELETE CASCADE,
+        CONSTRAINT fk_generated_analysis_item_document FOREIGN KEY (matched_document_id)
+          REFERENCES generated_case_documents(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `);
     await this.pool.query(
       `INSERT INTO email_settings
         (id, email_address, username, incoming_host, incoming_port, incoming_secure,

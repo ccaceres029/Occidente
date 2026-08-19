@@ -98,7 +98,9 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
               <div className="generated-list__case"><span><Mail size={18} /></span><div><strong>{item.code}</strong><p>{item.subject}</p></div></div>
               <div className="generated-list__sender"><strong>{item.senderName || 'Remitente'}</strong><small>{item.senderEmail || 'Sin dirección disponible'}</small></div>
               <time dateTime={item.receivedAt}>{dateLabel(item.receivedAt, true)}</time>
-              <Badge tone={item.documentCount ? 'success' : 'neutral'}><FileStack size={12} /> {item.documentCount}</Badge>
+              <Badge tone={item.documentAnalysis?.missingCount ? 'warning' : item.documentCount ? 'success' : 'neutral'}>
+                <FileStack size={12} /> {item.documentCount}{item.documentAnalysis ? ` · ${item.documentAnalysis.completenessPercent}%` : ''}
+              </Badge>
               <div className="generated-list__actions">
                 <Link to={`/casos-generados/${item.id}`} title="Abrir caso" aria-label={`Abrir ${item.code}`}><ArrowRight size={17} /></Link>
                 {currentUser.role === 'ADMIN' && <button className="icon-button row-delete-button" type="button" title="Eliminar caso" aria-label={`Eliminar ${item.code}`} onClick={() => setConfirmDelete(item)}><Trash2 size={16} /></button>}

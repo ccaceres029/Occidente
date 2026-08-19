@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Download, Eye, File, FileStack, HardDrive, Mail, ShieldCheck, Trash2 } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, CheckCircle2, Download, Eye, File, FileStack, HardDrive, Mail, RefreshCw, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
@@ -32,6 +32,7 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: 'success' | 'danger' } | null>(null);
 
   useEffect(() => {
@@ -65,6 +66,20 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
     }
   };
 
+  const analyzeCase = async () => {
+    if (!detail) return;
+    setAnalyzing(true);
+    try {
+      const result = await api.analyzeGeneratedCase(detail.id);
+      setDetail(result.case);
+      setToast({ message: 'Control de recepción documental actualizado.', tone: 'success' });
+    } catch (analysisError) {
+      setToast({ message: analysisError instanceof Error ? analysisError.message : 'No fue posible actualizar el análisis.', tone: 'danger' });
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   if (loading) return <LoadingState label="Cargando caso generado…" />;
   if (error || !detail) return <ErrorState message={error || 'No se encontró el caso generado.'} />;
 
@@ -90,6 +105,37 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
         <div><ShieldCheck size={18} /><span><small>Recepción</small><strong>{dateLabel(detail.receivedAt)}</strong><em>Trazabilidad desde IMAP</em></span></div>
       </section>
 
+      {detail.documentAnalysis && (
+        <section className={`document-completeness ${detail.documentAnalysis.missingCount ? 'has-missing' : 'is-complete'}`}>
+          <div className="document-completeness__score">
+            <span><Sparkles size={18} /></span>
+            <div><small>Análisis de recepción</small><strong>{detail.documentAnalysis.completenessPercent}%</strong><em>{detail.documentAnalysis.receivedCount} de {detail.documentAnalysis.expectedCount} requeridos</em></div>
+          </div>
+          <div className="document-completeness__result">
+            <header>
+              <Badge tone={detail.documentAnalysis.missingCount ? 'warning' : 'success'}>
+                {detail.documentAnalysis.missingCount ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
+                {detail.documentAnalysis.missingCount ? `${detail.documentAnalysis.missingCount} pendiente(s)` : 'Paquete completo'}
+              </Badge>
+              <span>{detail.documentAnalysis.provider === 'gemini' ? `Gemini · ${detail.documentAnalysis.model || 'activo'}` : 'Motor documental'}</span>
+            </header>
+            <div className="document-completeness__progress"><span style={{ width: `${detail.documentAnalysis.completenessPercent}%` }} /></div>
+            <p>{detail.documentAnalysis.summary}</p>
+            <div className="document-completeness__matrix">
+              {detail.documentAnalysis.items.map((item) => (
+                <span className={item.status === 'PRESENT' ? 'is-present' : 'is-missing'} key={item.requirementType} title={item.reason}>
+                  {item.status === 'PRESENT' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{item.label}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="document-completeness__action">
+            <Button variant="ghost" icon={<RefreshCw size={15} />} loading={analyzing} onClick={() => void analyzeCase()}>Analizar de nuevo</Button>
+            <small>Control de presencia; no valida contenido ni autenticidad.</small>
+          </div>
+        </section>
+      )}
+
       {detail.documents.length ? (
         <div className="generated-document-workspace">
           <aside className="generated-document-list">
@@ -105,7 +151,7 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
               <header><div><Eye size={18} /><span><strong>{selected.filename}</strong><small>{sizeLabel(selected.sizeBytes)} · Integridad SHA-256 verificada</small></span></div><a href={selectedUrl} target="_blank" rel="noreferrer"><Download size={15} /> Abrir documento</a></header>
               <div className="generated-document-frame">
                 {previewable(selected)
-                  ? <iframe src={selectedUrl} title={`Vista previa de ${selected.filename}`} />
+                  ? <iframe key={selected.id} src={selectedUrl} title={`Vista previa de ${selected.filename}`} />
                   : <EmptyState icon={<File size={26} />} title="Vista previa no disponible" body="Este formato puede abrirse o descargarse desde el botón superior." />}
               </div>
             </>}
