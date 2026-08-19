@@ -293,9 +293,9 @@ export class MailService {
       `SELECT incoming.id, incoming.message_id, incoming.mailbox_uid, incoming.subject,
         incoming.sender_name, incoming.sender_email, incoming.received_at, incoming.snippet,
         incoming.has_attachments, incoming.attachment_count, incoming.status,
-        generated.id AS case_id, generated.code AS case_code
+        gc.id AS case_id, gc.code AS case_code
        FROM incoming_requests incoming
-       LEFT JOIN generated_cases generated ON generated.incoming_request_id=incoming.id
+       LEFT JOIN generated_cases gc ON gc.incoming_request_id=incoming.id
        ORDER BY incoming.received_at DESC LIMIT ?`,
       [safeLimit],
     );
@@ -305,13 +305,13 @@ export class MailService {
   async listGeneratedCases(limit = 250): Promise<GeneratedCaseSummary[]> {
     const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
     const [rows] = await this.pool.query<GeneratedCaseRow[]>(
-      `SELECT generated.id, generated.code, generated.incoming_request_id, generated.status,
-        generated.subject, generated.sender_name, generated.sender_email, generated.received_at,
-        generated.created_at, COUNT(documents.id) AS document_count
-       FROM generated_cases generated
-       LEFT JOIN generated_case_documents documents ON documents.case_id=generated.id
-       GROUP BY generated.id
-       ORDER BY generated.received_at DESC, generated.code DESC LIMIT ?`,
+      `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
+        gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
+        gc.created_at, COUNT(documents.id) AS document_count
+       FROM generated_cases gc
+       LEFT JOIN generated_case_documents documents ON documents.case_id=gc.id
+       GROUP BY gc.id
+       ORDER BY gc.received_at DESC, gc.code DESC LIMIT ?`,
       [safeLimit],
     );
     return rows.map(publicGeneratedCase);
@@ -319,12 +319,12 @@ export class MailService {
 
   async getGeneratedCase(id: string): Promise<GeneratedCaseDetail | undefined> {
     const [caseRows] = await this.pool.query<GeneratedCaseRow[]>(
-      `SELECT generated.id, generated.code, generated.incoming_request_id, generated.status,
-        generated.subject, generated.sender_name, generated.sender_email, generated.received_at,
-        generated.created_at, COUNT(documents.id) AS document_count
-       FROM generated_cases generated
-       LEFT JOIN generated_case_documents documents ON documents.case_id=generated.id
-       WHERE generated.id=? GROUP BY generated.id`,
+      `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
+        gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
+        gc.created_at, COUNT(documents.id) AS document_count
+       FROM generated_cases gc
+       LEFT JOIN generated_case_documents documents ON documents.case_id=gc.id
+       WHERE gc.id=? GROUP BY gc.id`,
       [id],
     );
     const row = caseRows[0];
@@ -361,10 +361,10 @@ export class MailService {
     try {
       await connection.beginTransaction();
       const [rows] = await connection.query<GeneratedCaseRow[]>(
-        `SELECT generated.id, generated.code, generated.incoming_request_id, generated.status,
-          generated.subject, generated.sender_name, generated.sender_email, generated.received_at,
-          generated.created_at, 0 AS document_count
-         FROM generated_cases generated WHERE generated.id=? LIMIT 1 FOR UPDATE`,
+        `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
+          gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
+          gc.created_at, 0 AS document_count
+         FROM generated_cases gc WHERE gc.id=? LIMIT 1 FOR UPDATE`,
         [id],
       );
       const row = rows[0];
@@ -391,11 +391,11 @@ export class MailService {
     try {
       const account = await this.privateSettings();
       if (!account.enabled) return { imported: 0, generated: 0, documents: 0, total: (await this.listIncoming(250)).length };
+      let generated = await this.backfillStoredRequestsWithoutAttachments();
       client = this.imapClient(account);
       await client.connect();
       const lock = await client.getMailboxLock('INBOX');
       let imported = 0;
-      let generated = 0;
       let documents = 0;
       try {
         const count = client.mailbox && typeof client.mailbox !== 'boolean' ? client.mailbox.exists : 0;
@@ -440,6 +440,59 @@ export class MailService {
       this.syncing = false;
       if (client?.usable) await client.logout().catch(() => undefined);
     }
+  }
+
+  private async backfillStoredRequestsWithoutAttachments(): Promise<number> {
+    const [rows] = await this.pool.query<(RowDataPacket & {
+      id: string;
+      subject: string;
+      sender_name: string | null;
+      sender_email: string | null;
+      received_at: Date;
+    })[]>(
+      `SELECT incoming.id, incoming.subject, incoming.sender_name, incoming.sender_email, incoming.received_at
+       FROM incoming_requests incoming
+       LEFT JOIN generated_cases gc ON gc.incoming_request_id=incoming.id
+       WHERE gc.id IS NULL AND incoming.attachment_count=0
+       ORDER BY incoming.received_at, incoming.id LIMIT 250`,
+    );
+    let generated = 0;
+    for (const row of rows) {
+      const connection = await this.pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [existing] = await connection.query<RowDataPacket[]>(
+          'SELECT id FROM generated_cases WHERE incoming_request_id=? FOR UPDATE',
+          [row.id],
+        );
+        if (existing[0]) {
+          await connection.commit();
+          continue;
+        }
+        const date = caseDate(row.received_at);
+        const sequence = await this.nextDailySequence(connection, date);
+        const code = `AFPC-${date.replaceAll('-', '')}-${String(sequence).padStart(5, '0')}`;
+        await connection.query(
+          `INSERT INTO generated_cases
+            (id, code, incoming_request_id, status, subject, sender_name, sender_email,
+             received_at, created_at, updated_at)
+           VALUES (?, ?, ?, 'RECEIVED', ?, ?, ?, ?, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+          [randomUUID(), code, row.id, row.subject, row.sender_name, row.sender_email, row.received_at],
+        );
+        await connection.query(
+          `UPDATE incoming_requests SET status='CASE_CREATED', updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
+          [row.id],
+        );
+        await connection.commit();
+        generated += 1;
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+    }
+    return generated;
   }
 
   private async createCaseFromMessage(input: {
