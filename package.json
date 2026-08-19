@@ -1,6 +1,6 @@
 {
   "name": "dmo-bank-occi",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "private": true,
   "description": "Demo local de automatizacion de afiliaciones AFPC Occidente",
   "packageManager": "pnpm@11.16.0",

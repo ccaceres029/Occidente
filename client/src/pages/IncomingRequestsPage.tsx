@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock3, Inbox, Mail, Paperclip, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { BrainCircuit, Clock3, Inbox, Mail, Paperclip, RefreshCw, Search, Trash2, UserRoundCog } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
@@ -13,7 +13,13 @@ function receivedLabel(value: string): string {
   }).format(new Date(value));
 }
 
-export default function IncomingRequestsPage({ currentUser }: { currentUser: AuthUser }) {
+export default function IncomingRequestsPage({
+  currentUser,
+  onUserChange,
+}: {
+  currentUser: AuthUser;
+  onUserChange: (user: AuthUser) => void;
+}) {
   const [items, setItems] = useState<IncomingRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -22,20 +28,50 @@ export default function IncomingRequestsPage({ currentUser }: { currentUser: Aut
   const [toast, setToast] = useState<{ message: string; tone?: 'success' | 'danger' } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<IncomingRequest | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [savingPreference, setSavingPreference] = useState<'refresh' | 'analysis' | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError('');
     try {
       setItems((await api.incomingRequests()).items);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'No fue posible consultar la bandeja.');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    if (!currentUser.autoRefreshIncoming) return;
+    const timer = window.setInterval(() => void load(true), 30_000);
+    return () => window.clearInterval(timer);
+  }, [currentUser.autoRefreshIncoming, load]);
+
+  const savePreference = async (
+    key: 'autoRefreshIncoming' | 'autoAnalyzeCompleteCases',
+    value: boolean,
+  ) => {
+    setSavingPreference(key === 'autoRefreshIncoming' ? 'refresh' : 'analysis');
+    try {
+      const result = await api.saveUserPreferences({
+        autoRefreshIncoming: key === 'autoRefreshIncoming' ? value : currentUser.autoRefreshIncoming,
+        autoAnalyzeCompleteCases: key === 'autoAnalyzeCompleteCases' ? value : currentUser.autoAnalyzeCompleteCases,
+      });
+      onUserChange(result.user);
+      if (key === 'autoAnalyzeCompleteCases' && value) void load(true);
+      setToast({ message: 'Preferencia guardada en tu perfil.' });
+    } catch (preferenceError) {
+      setToast({
+        message: preferenceError instanceof Error ? preferenceError.message : 'No fue posible guardar la preferencia.',
+        tone: 'danger',
+      });
+    } finally {
+      setSavingPreference(null);
+    }
+  };
 
   const sync = async () => {
     setSyncing(true);
@@ -96,6 +132,22 @@ export default function IncomingRequestsPage({ currentUser }: { currentUser: Aut
         <div className="page-lead__actions">
           <Badge tone="neutral"><Inbox size={14} /> {items.length} recibidas</Badge>
           <Button icon={<RefreshCw size={17} />} loading={syncing} onClick={() => void sync()}>Recibir ahora</Button>
+        </div>
+      </section>
+
+      <section className="incoming-automation" aria-label="Automatización del perfil">
+        <header><UserRoundCog size={19} /><span><strong>Automatización de {currentUser.displayName}</strong><small>Estas opciones se guardan únicamente en tu perfil.</small></span></header>
+        <div>
+          <label className="incoming-automation__option">
+            <input type="checkbox" checked={currentUser.autoRefreshIncoming} disabled={savingPreference !== null} onChange={(event) => void savePreference('autoRefreshIncoming', event.target.checked)} />
+            <RefreshCw size={17} className={savingPreference === 'refresh' ? 'is-spinning' : ''} />
+            <span><strong>Actualización automática</strong><small>Recarga las solicitudes cada 30 segundos.</small></span>
+          </label>
+          <label className="incoming-automation__option">
+            <input type="checkbox" checked={currentUser.autoAnalyzeCompleteCases} disabled={savingPreference !== null} onChange={(event) => void savePreference('autoAnalyzeCompleteCases', event.target.checked)} />
+            <BrainCircuit size={17} className={savingPreference === 'analysis' ? 'is-spinning' : ''} />
+            <span><strong>Análisis automático al 100%</strong><small>Inicia el análisis integral solo con la matriz documental completa.</small></span>
+          </label>
         </div>
       </section>
 

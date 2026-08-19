@@ -16,6 +16,13 @@ export interface AuthUser {
   username: string;
   displayName: string;
   role: string;
+  autoRefreshIncoming: boolean;
+  autoAnalyzeCompleteCases: boolean;
+}
+
+export interface UserPreferences {
+  autoRefreshIncoming: boolean;
+  autoAnalyzeCompleteCases: boolean;
 }
 
 export interface ManagedUser extends AuthUser {
@@ -57,6 +64,8 @@ interface UserRow extends RowDataPacket {
   password_salt: string;
   password_hash: string;
   active: number | boolean;
+  auto_refresh_incoming: number | boolean;
+  auto_analyze_complete_cases: number | boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -189,6 +198,8 @@ export class MysqlStore implements CaseStore {
         password_salt CHAR(32) NOT NULL,
         password_hash CHAR(128) NOT NULL,
         active BOOLEAN NOT NULL DEFAULT TRUE,
+        auto_refresh_incoming BOOLEAN NOT NULL DEFAULT FALSE,
+        auto_analyze_complete_cases BOOLEAN NOT NULL DEFAULT FALSE,
         created_at DATETIME(3) NOT NULL,
         updated_at DATETIME(3) NOT NULL,
         INDEX idx_users_active (active)
@@ -383,6 +394,7 @@ export class MysqlStore implements CaseStore {
           REFERENCES incoming_requests(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     `);
+    await this.ensureUserPreferenceColumns();
     await this.ensureMailIntakeColumns();
     await this.pool.query(
       `INSERT INTO email_settings
@@ -394,6 +406,21 @@ export class MysqlStore implements CaseStore {
        ON DUPLICATE KEY UPDATE id=id`,
     );
     await this.pool.query('DELETE FROM user_sessions WHERE expires_at <= UTC_TIMESTAMP(3)');
+  }
+
+  private async ensureUserPreferenceColumns(): Promise<void> {
+    const columns = [
+      ['auto_refresh_incoming', 'ALTER TABLE users ADD COLUMN auto_refresh_incoming BOOLEAN NOT NULL DEFAULT FALSE AFTER active'],
+      ['auto_analyze_complete_cases', 'ALTER TABLE users ADD COLUMN auto_analyze_complete_cases BOOLEAN NOT NULL DEFAULT FALSE AFTER auto_refresh_incoming'],
+    ] as const;
+    for (const [columnName, statement] of columns) {
+      const [rows] = await this.pool.query<RowDataPacket[]>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME=? LIMIT 1`,
+        [columnName],
+      );
+      if (!rows[0]) await this.pool.query(statement);
+    }
   }
 
   private async ensureMailIntakeColumns(): Promise<void> {
@@ -598,7 +625,8 @@ export class MysqlStore implements CaseStore {
 
   async listUsers(): Promise<ManagedUser[]> {
     const [rows] = await this.pool.query<UserRow[]>(
-      `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+      `SELECT id, username, display_name, role, password_salt, password_hash, active,
+        auto_refresh_incoming, auto_analyze_complete_cases, created_at, updated_at
        FROM users ORDER BY active DESC, display_name ASC, username ASC`,
     );
     return rows.map((row) => this.managedUser(row));
@@ -619,7 +647,8 @@ export class MysqlStore implements CaseStore {
       [id, username, user.displayName, user.role, salt, hash, now, now],
     );
     const [rows] = await this.pool.query<UserRow[]>(
-      `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+      `SELECT id, username, display_name, role, password_salt, password_hash, active,
+        auto_refresh_incoming, auto_analyze_complete_cases, created_at, updated_at
        FROM users WHERE id=?`,
       [id],
     );
@@ -631,7 +660,8 @@ export class MysqlStore implements CaseStore {
     try {
       await connection.beginTransaction();
       const [existingRows] = await connection.query<UserRow[]>(
-        `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+        `SELECT id, username, display_name, role, password_salt, password_hash, active,
+          auto_refresh_incoming, auto_analyze_complete_cases, created_at, updated_at
          FROM users WHERE id=? FOR UPDATE`,
         [id],
       );
@@ -660,7 +690,8 @@ export class MysqlStore implements CaseStore {
         await connection.query('DELETE FROM user_sessions WHERE user_id=?', [id]);
       }
       const [updatedRows] = await connection.query<UserRow[]>(
-        `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+        `SELECT id, username, display_name, role, password_salt, password_hash, active,
+          auto_refresh_incoming, auto_analyze_complete_cases, created_at, updated_at
          FROM users WHERE id=?`,
         [id],
       );
@@ -676,7 +707,8 @@ export class MysqlStore implements CaseStore {
 
   async deactivateManagedUser(id: string): Promise<ManagedUser | undefined> {
     const [rows] = await this.pool.query<UserRow[]>(
-      `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+      `SELECT id, username, display_name, role, password_salt, password_hash, active,
+        auto_refresh_incoming, auto_analyze_complete_cases, created_at, updated_at
        FROM users WHERE id=?`,
       [id],
     );
@@ -693,7 +725,8 @@ export class MysqlStore implements CaseStore {
   async authenticate(usernameInput: string, password: string): Promise<AuthUser | undefined> {
     const username = usernameInput.trim().toLocaleLowerCase('es-HN');
     const [rows] = await this.pool.query<UserRow[]>(
-      `SELECT id, username, display_name, role, password_salt, password_hash
+      `SELECT id, username, display_name, role, password_salt, password_hash,
+        auto_refresh_incoming, auto_analyze_complete_cases
        FROM users WHERE username=? AND active=TRUE LIMIT 1`,
       [username],
     );
@@ -724,7 +757,8 @@ export class MysqlStore implements CaseStore {
   async resolveSession(token: string | undefined): Promise<AuthUser | undefined> {
     if (!token) return undefined;
     const [rows] = await this.pool.query<UserRow[]>(
-      `SELECT u.id, u.username, u.display_name, u.role, u.password_salt, u.password_hash
+      `SELECT u.id, u.username, u.display_name, u.role, u.password_salt, u.password_hash,
+        u.auto_refresh_incoming, u.auto_analyze_complete_cases
        FROM user_sessions s JOIN users u ON u.id=s.user_id
        WHERE s.token_hash=? AND s.expires_at>UTC_TIMESTAMP(3) AND u.active=TRUE LIMIT 1`,
       [tokenHash(token)],
@@ -738,9 +772,39 @@ export class MysqlStore implements CaseStore {
     if (token) await this.pool.query('DELETE FROM user_sessions WHERE token_hash=?', [tokenHash(token)]);
   }
 
+  async updateUserPreferences(id: string, preferences: UserPreferences): Promise<AuthUser | undefined> {
+    await this.pool.query(
+      `UPDATE users SET auto_refresh_incoming=?, auto_analyze_complete_cases=?, updated_at=UTC_TIMESTAMP(3)
+       WHERE id=? AND active=TRUE`,
+      [preferences.autoRefreshIncoming, preferences.autoAnalyzeCompleteCases, id],
+    );
+    const [rows] = await this.pool.query<UserRow[]>(
+      `SELECT id, username, display_name, role, password_salt, password_hash,
+        auto_refresh_incoming, auto_analyze_complete_cases
+       FROM users WHERE id=? AND active=TRUE LIMIT 1`,
+      [id],
+    );
+    return rows[0] ? this.publicUser(rows[0]) : undefined;
+  }
+
+  async hasAutomaticAnalysisEnabled(): Promise<boolean> {
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT id FROM users
+       WHERE active=TRUE AND auto_analyze_complete_cases=TRUE LIMIT 1`,
+    );
+    return Boolean(rows[0]);
+  }
+
   private publicUser(row: UserRow | undefined): AuthUser {
     if (!row) throw new Error('No fue posible recuperar el usuario.');
-    return { id: row.id, username: row.username, displayName: row.display_name, role: row.role };
+    return {
+      id: row.id,
+      username: row.username,
+      displayName: row.display_name,
+      role: row.role,
+      autoRefreshIncoming: Boolean(row.auto_refresh_incoming),
+      autoAnalyzeCompleteCases: Boolean(row.auto_analyze_complete_cases),
+    };
   }
 
   private managedUser(row: UserRow | undefined): ManagedUser {

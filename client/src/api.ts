@@ -75,6 +75,8 @@ export const api = {
       body: JSON.stringify({ username, password, rememberDevice }),
     }),
   me: () => request<{ user: AuthUser }>('/auth/me'),
+  saveUserPreferences: (preferences: Pick<AuthUser, 'autoRefreshIncoming' | 'autoAnalyzeCompleteCases'>) =>
+    request<{ user: AuthUser }>('/auth/preferences', { method: 'PUT', body: JSON.stringify(preferences) }),
   logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
   users: () => request<{ items: ManagedUser[] }>('/users'),
   createUser: (input: UserInput & { password: string }) =>

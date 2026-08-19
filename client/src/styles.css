@@ -601,6 +601,17 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .status-filter-row button.is-active { border-color: #c7e1d2; color: var(--green-800); background: var(--green-50); }
 
 /* Incoming requests and mail settings */
+.incoming-automation { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 14px; padding: 13px 15px; border: 1px solid #cfe5d8; border-radius: 8px; background: var(--green-50); }
+.incoming-automation > header { display: flex; min-width: 220px; align-items: center; gap: 10px; color: var(--green-700); }
+.incoming-automation > header span, .incoming-automation__option span { display: flex; flex-direction: column; gap: 2px; }
+.incoming-automation > header strong { color: #2f4b3b; font-size: 10px; }
+.incoming-automation > header small, .incoming-automation__option small { color: #74877c; font-size: 8px; }
+.incoming-automation > div { display: grid; min-width: min(100%, 560px); grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.incoming-automation__option { display: grid; min-height: 48px; grid-template-columns: 16px 18px minmax(0, 1fr); align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid #c9dfd2; border-radius: 8px; color: var(--green-700); background: white; cursor: pointer; }
+.incoming-automation__option input { width: 15px; height: 15px; margin: 0; accent-color: var(--green-700); }
+.incoming-automation__option input:disabled { cursor: wait; }
+.incoming-automation__option strong { color: #3d5548; font-size: 9px; }
+.incoming-automation__option .is-spinning { animation: spin .8s linear infinite; }
 .incoming-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 16px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 8px; background: white; box-shadow: var(--shadow-sm); }
 .incoming-toolbar > div:last-child { display: flex; align-items: center; gap: 7px; color: #64736b; font-size: 9px; font-weight: 650; white-space: nowrap; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green-600); box-shadow: 0 0 0 4px var(--green-50); }
@@ -1644,6 +1655,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .login-card h2 { font-size: 21px; }
   .login-options { align-items: flex-start; flex-direction: column; gap: 10px; }
   .login-submit { width: 100%; }
+  .incoming-automation { align-items: stretch; flex-direction: column; }
+  .incoming-automation > div { min-width: 0; grid-template-columns: 1fr; }
   .incoming-toolbar { align-items: stretch; flex-direction: column; }
   .incoming-toolbar > div:last-child { justify-content: center; }
   .incoming-list__header { display: none; }

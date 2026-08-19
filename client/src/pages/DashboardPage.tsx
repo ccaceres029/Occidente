@@ -20,7 +20,7 @@ import {
   TrendingDown,
 } from 'lucide-react';
 import { api } from '../api';
-import type { DashboardData } from '../types';
+import type { AuthUser, DashboardData } from '../types';
 import { CaseCard } from '../components/CaseCard';
 import { Badge, Button, ErrorState, LoadingState, Toast } from '../components/ui';
 import { spanishDynamicText, titleFromStatus } from '../utils';
@@ -71,7 +71,7 @@ function activityDate(value: string): string {
   }).format(new Date(value));
 }
 
-export default function DashboardPage() {
+export default function DashboardPage({ currentUser }: { currentUser: AuthUser }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [resetting, setResetting] = useState(false);
@@ -136,7 +136,7 @@ export default function DashboardPage() {
       <section className="page-lead">
         <div>
           <div className="eyebrow"><span /> {todayLabel}</div>
-          <h2>Buenos días, Cinthia</h2>
+          <h2>Buenos días, {currentUser.displayName}</h2>
           {mailIntake
             ? <p>Se han recibido <strong>{metrics.incomingTotal ?? 0} solicitudes</strong> y generado {metrics.generatedTotal ?? 0} casos desde el buzón conectado.</p>
             : <p>Tienes <strong>{metrics.inReview} expedientes en revisión</strong> y {metrics.compliance} requieren seguimiento de Cumplimiento.</p>}

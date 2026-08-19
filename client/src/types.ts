@@ -13,6 +13,8 @@ export interface AuthUser {
   username: string;
   displayName: string;
   role: string;
+  autoRefreshIncoming: boolean;
+  autoAnalyzeCompleteCases: boolean;
 }
 
 export interface ManagedUser extends AuthUser {

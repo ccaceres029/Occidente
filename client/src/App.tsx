@@ -47,12 +47,12 @@ export default function App() {
   return (
     <Routes>
       <Route element={<Shell user={user} onLogout={() => setUser(null)} />}>
-        <Route index element={<DashboardPage />} />
+        <Route index element={<DashboardPage currentUser={user} />} />
         <Route path="casos" element={<CasesPage />} />
         <Route path="casos/nuevo" element={<NewCasePage />} />
         <Route path="casos/:id" element={<CaseDetailPage />} />
         <Route path="politicas" element={<PoliciesPage />} />
-        <Route path="solicitudes" element={<IncomingRequestsPage currentUser={user} />} />
+        <Route path="solicitudes" element={<IncomingRequestsPage currentUser={user} onUserChange={setUser} />} />
         <Route path="casos-generados" element={<GeneratedCasesPage currentUser={user} />} />
         <Route path="casos-generados/:id" element={<GeneratedCaseDetailPage currentUser={user} />} />
         <Route path="configuracion/correo" element={<EmailSettingsPage />} />

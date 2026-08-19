@@ -86,6 +86,11 @@ interface UserUpdateBody extends UserCreateBody {
   active?: unknown;
 }
 
+interface UserPreferencesBody {
+  autoRefreshIncoming?: unknown;
+  autoAnalyzeCompleteCases?: unknown;
+}
+
 interface CaseParams {
   id: string;
 }
@@ -179,6 +184,16 @@ function userFields(body: UserCreateBody, passwordRequired: boolean) {
     throw new WorkflowError('La contraseña debe tener al menos 12 caracteres.', 400);
   }
   return { username, displayName, role, ...(password ? { password } : {}) };
+}
+
+function userPreferenceFields(body: UserPreferencesBody) {
+  if (typeof body?.autoRefreshIncoming !== 'boolean' || typeof body?.autoAnalyzeCompleteCases !== 'boolean') {
+    throw new WorkflowError('Las preferencias de automatización deben estar activadas o desactivadas.', 400);
+  }
+  return {
+    autoRefreshIncoming: body.autoRefreshIncoming,
+    autoAnalyzeCompleteCases: body.autoAnalyzeCompleteCases,
+  };
 }
 
 function isDuplicateEntry(error: unknown): boolean {
@@ -550,6 +565,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.get('/api/auth/me', async (request) => ({ user: requestUser(request) }));
 
+  app.put<{ Body: UserPreferencesBody }>('/api/auth/preferences', async (request) => {
+    const current = requestUser(request);
+    if (!current || !mysqlStore) throw new WorkflowError('La sesión no permite guardar preferencias.', 401);
+    const user = await mysqlStore.updateUserPreferences(current.id, userPreferenceFields(request.body));
+    if (!user) throw new WorkflowError('No se encontró el perfil activo.', 404);
+    return { user };
+  });
+
   app.post('/api/auth/logout', async (request, reply) => {
     await mysqlStore?.deleteSession(request.cookies.occidente_session);
     reply.clearCookie('occidente_session', { path: '/' });
@@ -655,12 +678,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.get<{ Querystring: { limit?: string } }>('/api/incoming-requests', async (request) => {
     if (!mailService) throw new WorkflowError('La bandeja requiere la conexión MySQL.', 503);
+    if (requestUser(request)?.autoAnalyzeCompleteCases) await mailService.startReadyCaseAnalysis();
     return { items: await mailService.listIncoming(Number(request.query.limit || 100)) };
   });
 
-  app.post('/api/incoming-requests/sync', async () => {
+  app.post('/api/incoming-requests/sync', async (request) => {
     if (!mailService) throw new WorkflowError('La bandeja requiere la conexión MySQL.', 503);
-    return mailService.syncIncoming();
+    const result = await mailService.syncIncoming();
+    if (requestUser(request)?.autoAnalyzeCompleteCases) await mailService.startReadyCaseAnalysis();
+    return result;
   });
 
   app.delete<{ Params: CaseParams }>('/api/incoming-requests/:id', async (request) => {
@@ -679,21 +705,29 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.get<{ Querystring: { limit?: string } }>('/api/generated-cases', async (request) => {
     if (!mailService) throw new WorkflowError('Los casos generados requieren la conexión MySQL.', 503);
-    return { items: await mailService.listGeneratedCases(Number(request.query.limit || 250)) };
+    return {
+      items: await mailService.listGeneratedCases(
+        Number(request.query.limit || 250),
+        requestUser(request)?.autoAnalyzeCompleteCases === true,
+      ),
+    };
   });
 
   app.get<{ Params: CaseParams }>('/api/generated-cases/:id', async (request) => {
     if (!mailService) throw new WorkflowError('Los casos generados requieren la conexión MySQL.', 503);
-    const generatedCase = await mailService.getGeneratedCase(request.params.id);
+    const generatedCase = await mailService.getGeneratedCase(
+      request.params.id,
+      requestUser(request)?.autoAnalyzeCompleteCases === true,
+    );
     if (!generatedCase) throw new WorkflowError('No se encontró el caso generado.', 404);
     return { case: generatedCase };
   });
 
   app.post<{ Params: CaseParams }>('/api/generated-cases/:id/analyze', async (request) => {
     if (!mailService) throw new WorkflowError('El análisis documental requiere la conexión MySQL.', 503);
-    const analysis = await mailService.analyzeGeneratedCase(request.params.id, true);
+    const analysis = await mailService.analyzeGeneratedCase(request.params.id, true, true);
     if (!analysis) throw new WorkflowError('No se encontró el caso generado.', 404);
-    const generatedCase = await mailService.getGeneratedCase(request.params.id);
+    const generatedCase = await mailService.getGeneratedCase(request.params.id, false);
     if (!generatedCase) throw new WorkflowError('No se encontró el caso generado.', 404);
     return { case: generatedCase };
   });
@@ -787,7 +821,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
-  app.get('/api/dashboard', async () => mailService ? mailService.getOperationalDashboard() : dashboard(store));
+  app.get('/api/dashboard', async (request) => mailService
+    ? mailService.getOperationalDashboard(requestUser(request)?.autoAnalyzeCompleteCases === true)
+    : dashboard(store));
 
   app.get('/api/policies', async () => getPolicyCatalog());
 
@@ -1322,11 +1358,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   let mailTimer: NodeJS.Timeout | undefined;
   if (mailService && mailRuntime.credentialsKey) {
+    const syncMailAutomation = async () => {
+      await mailService.syncIncoming();
+      if (await mysqlStore?.hasAutomaticAnalysisEnabled()) await mailService.startReadyCaseAnalysis(10);
+    };
     mailTimer = setInterval(() => {
-      void mailService.syncIncoming().catch((error) => app.log.warn({ error }, 'No se pudo sincronizar el buzón IMAP'));
+      void syncMailAutomation().catch((error) => app.log.warn({ error }, 'No se pudo sincronizar el buzón IMAP'));
     }, mailRuntime.syncIntervalSeconds * 1000);
     mailTimer.unref();
-    void mailService.syncIncoming()
+    void syncMailAutomation()
       .then(() => mailService.notifyPendingMissingDocumentRequests())
       .catch((error) => app.log.warn({ error }, 'Sincronización IMAP inicial pendiente'));
   }

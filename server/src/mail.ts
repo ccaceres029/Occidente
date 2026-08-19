@@ -406,6 +406,13 @@ function numberValue(value: number | string | null | undefined): number {
   return Number(value || 0);
 }
 
+export function shouldRunAutomaticAnalysis(
+  enabled: boolean,
+  analysis?: Pick<DocumentCompletenessAnalysis, 'status' | 'completenessPercent'>,
+): boolean {
+  return enabled && analysis?.status === 'COMPLETE' && analysis.completenessPercent === 100;
+}
+
 export function findTrashMailboxPath(
   mailboxes: Array<{ path: string; specialUse?: string }>,
 ): string | undefined {
@@ -618,7 +625,7 @@ export class MailService {
     return rows.map(publicIncoming);
   }
 
-  async listGeneratedCases(limit = 250): Promise<GeneratedCaseSummary[]> {
+  async listGeneratedCases(limit = 250, autoAnalyzeComplete = false): Promise<GeneratedCaseSummary[]> {
     const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
     const [rows] = await this.pool.query<GeneratedCaseRow[]>(
       `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
@@ -642,7 +649,10 @@ export class MailService {
       [safeLimit],
     );
     const generatedCases = rows.map(publicGeneratedCase);
-    for (const row of rows.filter((item) => item.analysis_status === 'COMPLETE' &&
+    for (const row of rows.filter((item) => shouldRunAutomaticAnalysis(autoAnalyzeComplete, {
+      status: item.analysis_status || 'MISSING_DOCUMENTS',
+      completenessPercent: Number(item.completeness_percent),
+    }) &&
       (!item.intelligence_status || item.intelligence_status === 'ANALYZING' ||
         item.intelligence_engine_version !== GENERATED_CASE_INTELLIGENCE_VERSION)).slice(0, 3)) {
       void this.ensureGeneratedCaseIntelligence(row.id, false).catch(() => undefined);
@@ -650,7 +660,25 @@ export class MailService {
     return generatedCases;
   }
 
-  async getOperationalDashboard(): Promise<MailOperationalDashboard> {
+  async startReadyCaseAnalysis(limit = 3): Promise<number> {
+    const safeLimit = Math.max(1, Math.min(10, Math.trunc(limit)));
+    const [rows] = await this.pool.query<(RowDataPacket & { id: string })[]>(
+      `SELECT gc.id
+       FROM generated_cases gc
+       INNER JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
+       LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id
+       WHERE analysis.status='COMPLETE' AND analysis.completeness_percent=100
+         AND (intelligence.case_id IS NULL OR intelligence.status='ANALYZING'
+           OR intelligence.engine_version<>?)
+       ORDER BY analysis.updated_at, gc.received_at
+       LIMIT ?`,
+      [GENERATED_CASE_INTELLIGENCE_VERSION, safeLimit],
+    );
+    for (const row of rows) void this.ensureGeneratedCaseIntelligence(row.id, false).catch(() => undefined);
+    return rows.length;
+  }
+
+  async getOperationalDashboard(autoAnalyzeComplete = false): Promise<MailOperationalDashboard> {
     const [summaryResult, volumeResult, recentIncoming, recentGeneratedCases] = await Promise.all([
       this.pool.query<OperationalSummaryRow[]>(
         `SELECT
@@ -678,7 +706,7 @@ export class MailService {
          ORDER BY DATE(received_at)`,
       ),
       this.listIncoming(5),
-      this.listGeneratedCases(5),
+      this.listGeneratedCases(5, autoAnalyzeComplete),
     ]);
     const [summaryRows] = summaryResult;
     const [volumeRows] = volumeResult;
@@ -690,8 +718,8 @@ export class MailService {
     );
   }
 
-  async getGeneratedCase(id: string): Promise<GeneratedCaseDetail | undefined> {
-    await this.analyzeGeneratedCase(id, false);
+  async getGeneratedCase(id: string, autoAnalyzeComplete = false): Promise<GeneratedCaseDetail | undefined> {
+    await this.analyzeGeneratedCase(id, false, autoAnalyzeComplete);
     const [caseRows] = await this.pool.query<GeneratedCaseRow[]>(
       `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
         gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
@@ -767,11 +795,17 @@ export class MailService {
     };
   }
 
-  async analyzeGeneratedCase(id: string, force = true): Promise<DocumentCompletenessAnalysis | undefined> {
+  async analyzeGeneratedCase(
+    id: string,
+    force = true,
+    autoAnalyzeComplete = true,
+  ): Promise<DocumentCompletenessAnalysis | undefined> {
     if (!force) {
       const stored = await this.storedDocumentAnalysis(id);
       if (stored?.version === DOCUMENT_COMPLETENESS_VERSION) {
-        if (stored.status === 'COMPLETE') void this.ensureGeneratedCaseIntelligence(id, false).catch(() => undefined);
+        if (shouldRunAutomaticAnalysis(autoAnalyzeComplete, stored)) {
+          void this.ensureGeneratedCaseIntelligence(id, false).catch(() => undefined);
+        }
         return stored;
       }
     }
@@ -834,9 +868,9 @@ export class MailService {
     } finally {
       connection.release();
     }
-    if (analysis.status === 'COMPLETE') {
+    if (shouldRunAutomaticAnalysis(autoAnalyzeComplete, analysis)) {
       void this.ensureGeneratedCaseIntelligence(id, force).catch(() => undefined);
-    } else {
+    } else if (analysis.status !== 'COMPLETE') {
       await this.pool.query('DELETE FROM generated_case_intelligence WHERE case_id=?', [id]);
     }
     return analysis;
@@ -1308,7 +1342,7 @@ export class MailService {
           [randomUUID(), generatedId, row.id, row.message_id, row.subject, row.sender_email],
         );
         await connection.commit();
-        const analysis = await this.analyzeGeneratedCase(generatedId, true).catch(() => undefined);
+        const analysis = await this.analyzeGeneratedCase(generatedId, true, false).catch(() => undefined);
         if (analysis?.missingCount) {
           await this.requestMissingDocuments(generatedId, row.message_id).catch(() => undefined);
         }
@@ -1416,7 +1450,7 @@ export class MailService {
           [linkedCase.id],
         );
         await connection.commit();
-        const analysis = await this.analyzeGeneratedCase(linkedCase.id, true).catch(() => undefined);
+        const analysis = await this.analyzeGeneratedCase(linkedCase.id, true, false).catch(() => undefined);
         if (analysis?.missingCount) {
           await this.requestMissingDocuments(linkedCase.id, input.messageId).catch(() => undefined);
         }
@@ -1469,7 +1503,7 @@ export class MailService {
         [randomUUID(), generatedId, incomingId, input.messageId, input.subject, input.senderEmail || null],
       );
       await connection.commit();
-      const analysis = await this.analyzeGeneratedCase(generatedId, true).catch(() => undefined);
+      const analysis = await this.analyzeGeneratedCase(generatedId, true, false).catch(() => undefined);
       if (analysis?.missingCount) {
         await this.requestMissingDocuments(generatedId, input.messageId).catch(() => undefined);
       }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { buildMailOperationalDashboard, findTrashMailboxPath } from '../src/mail.js';
+import { buildMailOperationalDashboard, findTrashMailboxPath, shouldRunAutomaticAnalysis } from '../src/mail.js';
 
 describe('resumen operativo desde recepción de correo', () => {
   test('consolida solicitudes, casos, documentos y etapas reales', () => {
@@ -41,5 +41,13 @@ describe('movimiento seguro del correo procesado', () => {
 
   test('no adivina una carpeta cuando el servidor no expone Papelera', () => {
     assert.equal(findTrashMailboxPath([{ path: 'INBOX' }, { path: 'Archivo' }]), undefined);
+  });
+});
+
+describe('análisis automático por perfil', () => {
+  test('solo inicia con la preferencia activa y la matriz al 100%', () => {
+    assert.equal(shouldRunAutomaticAnalysis(false, { status: 'COMPLETE', completenessPercent: 100 }), false);
+    assert.equal(shouldRunAutomaticAnalysis(true, { status: 'MISSING_DOCUMENTS', completenessPercent: 99 }), false);
+    assert.equal(shouldRunAutomaticAnalysis(true, { status: 'COMPLETE', completenessPercent: 100 }), true);
   });
 });
