@@ -13,6 +13,7 @@ import {
   Mail,
   Search,
   ShieldCheck,
+  Users,
   X,
 } from 'lucide-react';
 import { api } from '../api';
@@ -30,6 +31,7 @@ const titles: Array<[RegExp, string, string]> = [
   [/^\/politicas/, 'Políticas y reglas', 'Parametrización del motor de control'],
   [/^\/solicitudes/, 'Solicitudes entrantes', 'Correos recibidos para iniciar el proceso'],
   [/^\/configuracion\/correo/, 'Configuración de correo', 'Conexiones IMAP y SMTP del portal'],
+  [/^\/configuracion\/usuarios/, 'Administración de usuarios', 'Accesos, roles y estado de las cuentas'],
 ];
 
 export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
@@ -107,6 +109,7 @@ export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: ()
 
           <span className="nav-group-label nav-group-label--spaced">Configuración</span>
           <NavLink to="/configuracion/correo"><Mail size={19} /><span>Correo IMAP / SMTP</span></NavLink>
+          {user.role === 'ADMIN' && <NavLink to="/configuracion/usuarios"><Users size={19} /><span>Usuarios</span></NavLink>}
         </nav>
 
         <div className="sidebar__bottom">

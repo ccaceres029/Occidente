@@ -18,6 +18,37 @@ export interface AuthUser {
   role: string;
 }
 
+export interface ManagedUser extends AuthUser {
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateManagedUserInput {
+  username: string;
+  displayName: string;
+  role: string;
+  password: string;
+}
+
+export interface UpdateManagedUserInput {
+  username: string;
+  displayName: string;
+  role: string;
+  active: boolean;
+  password?: string;
+}
+
+export class UserManagementError extends Error {
+  readonly code: 'LAST_ACTIVE_ADMIN';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'UserManagementError';
+    this.code = 'LAST_ACTIVE_ADMIN';
+  }
+}
+
 interface UserRow extends RowDataPacket {
   id: string;
   username: string;
@@ -25,6 +56,9 @@ interface UserRow extends RowDataPacket {
   role: string;
   password_salt: string;
   password_hash: string;
+  active: number | boolean;
+  created_at: Date;
+  updated_at: Date;
 }
 
 interface PayloadRow extends RowDataPacket {
@@ -397,10 +431,18 @@ export class MysqlStore implements CaseStore {
   private async ensureBootstrapUser(): Promise<void> {
     const [rows] = await this.pool.query<RowDataPacket[]>('SELECT COUNT(*) AS total FROM users');
     if (Number(rows[0]?.total ?? 0) > 0 || !this.bootstrapUser) return;
-    await this.createUser(this.bootstrapUser);
+    await this.createManagedUser(this.bootstrapUser);
   }
 
-  async createUser(user: BootstrapUserConfig): Promise<AuthUser> {
+  async listUsers(): Promise<ManagedUser[]> {
+    const [rows] = await this.pool.query<UserRow[]>(
+      `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+       FROM users ORDER BY active DESC, display_name ASC, username ASC`,
+    );
+    return rows.map((row) => this.managedUser(row));
+  }
+
+  async createManagedUser(user: CreateManagedUserInput): Promise<ManagedUser> {
     const username = user.username.trim().toLocaleLowerCase('es-HN');
     if (user.password.length < 12) throw new Error('La contraseña inicial debe tener al menos 12 caracteres.');
     const salt = randomBytes(16).toString('hex');
@@ -411,16 +453,79 @@ export class MysqlStore implements CaseStore {
       `INSERT INTO users
         (id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-       ON DUPLICATE KEY UPDATE display_name=VALUES(display_name), role=VALUES(role),
-         password_salt=VALUES(password_salt), password_hash=VALUES(password_hash), active=TRUE,
-         updated_at=VALUES(updated_at)`,
+      `,
       [id, username, user.displayName, user.role, salt, hash, now, now],
     );
     const [rows] = await this.pool.query<UserRow[]>(
-      'SELECT id, username, display_name, role, password_salt, password_hash FROM users WHERE username=?',
-      [username],
+      `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+       FROM users WHERE id=?`,
+      [id],
     );
-    return this.publicUser(rows[0]);
+    return this.managedUser(rows[0]);
+  }
+
+  async updateManagedUser(id: string, user: UpdateManagedUserInput): Promise<ManagedUser | undefined> {
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [existingRows] = await connection.query<UserRow[]>(
+        `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+         FROM users WHERE id=? FOR UPDATE`,
+        [id],
+      );
+      const existing = existingRows[0];
+      if (!existing) {
+        await connection.rollback();
+        return undefined;
+      }
+
+      if (existing.active && existing.role === 'ADMIN' && (!user.active || user.role !== 'ADMIN')) {
+        const [adminRows] = await connection.query<RowDataPacket[]>(
+          `SELECT id FROM users WHERE active=TRUE AND role='ADMIN' FOR UPDATE`,
+        );
+        if (adminRows.length <= 1) throw new UserManagementError('Debe conservar al menos un administrador activo.');
+      }
+
+      const username = user.username.trim().toLocaleLowerCase('es-HN');
+      const salt = user.password ? randomBytes(16).toString('hex') : existing.password_salt;
+      const hash = user.password ? await passwordHash(user.password, salt) : existing.password_hash;
+      await connection.query(
+        `UPDATE users SET username=?, display_name=?, role=?, active=?, password_salt=?, password_hash=?, updated_at=?
+         WHERE id=?`,
+        [username, user.displayName, user.role, user.active, salt, hash, new Date(), id],
+      );
+      if (user.password || !user.active) {
+        await connection.query('DELETE FROM user_sessions WHERE user_id=?', [id]);
+      }
+      const [updatedRows] = await connection.query<UserRow[]>(
+        `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+         FROM users WHERE id=?`,
+        [id],
+      );
+      await connection.commit();
+      return this.managedUser(updatedRows[0]);
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async deactivateManagedUser(id: string): Promise<ManagedUser | undefined> {
+    const [rows] = await this.pool.query<UserRow[]>(
+      `SELECT id, username, display_name, role, password_salt, password_hash, active, created_at, updated_at
+       FROM users WHERE id=?`,
+      [id],
+    );
+    const existing = rows[0];
+    if (!existing) return undefined;
+    return this.updateManagedUser(id, {
+      username: existing.username,
+      displayName: existing.display_name,
+      role: existing.role,
+      active: false,
+    });
   }
 
   async authenticate(usernameInput: string, password: string): Promise<AuthUser | undefined> {
@@ -474,6 +579,16 @@ export class MysqlStore implements CaseStore {
   private publicUser(row: UserRow | undefined): AuthUser {
     if (!row) throw new Error('No fue posible recuperar el usuario.');
     return { id: row.id, username: row.username, displayName: row.display_name, role: row.role };
+  }
+
+  private managedUser(row: UserRow | undefined): ManagedUser {
+    if (!row) throw new Error('No fue posible recuperar el usuario.');
+    return {
+      ...this.publicUser(row),
+      active: Boolean(row.active),
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    };
   }
 }
 

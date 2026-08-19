@@ -33,7 +33,7 @@ import { DOCUMENT_PREVIEW_MAX_PAGE, DocumentPreviewCache } from './documentPrevi
 import { applyVerifiedPdfEvidence, PdfEvidenceLocator } from './pdfEvidenceLocator.js';
 import { STAGE_LABELS, STATUS_LABELS, STATUS_PROGRESS } from './labels.js';
 import { MailService, type MailSettingsInput } from './mail.js';
-import { MysqlStore, type AuthUser } from './mysqlStore.js';
+import { MysqlStore, UserManagementError, type AuthUser } from './mysqlStore.js';
 import { getPolicyCatalog } from './policyCatalog.js';
 import { allowedActions, evaluateCaseRules } from './rules.js';
 import { JsonStore, type CaseStore } from './store.js';
@@ -63,6 +63,21 @@ interface LoginBody {
   username?: unknown;
   password?: unknown;
   rememberDevice?: unknown;
+}
+
+interface UserParams {
+  id: string;
+}
+
+interface UserCreateBody {
+  username?: unknown;
+  displayName?: unknown;
+  role?: unknown;
+  password?: unknown;
+}
+
+interface UserUpdateBody extends UserCreateBody {
+  active?: unknown;
 }
 
 interface CaseParams {
@@ -134,6 +149,32 @@ function ensureCase(store: CaseStore, caseId: string): AfpcCase {
 
 function textOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+const USER_ROLES = ['ADMIN', 'AFILIACIONES', 'CUMPLIMIENTO', 'CONSULTA'] as const;
+
+function userFields(body: UserCreateBody, passwordRequired: boolean) {
+  const username = typeof body?.username === 'string' ? body.username.trim().toLocaleLowerCase('es-HN') : '';
+  const displayName = typeof body?.displayName === 'string' ? body.displayName.trim() : '';
+  const role = typeof body?.role === 'string' ? body.role.trim().toUpperCase() : '';
+  const password = typeof body?.password === 'string' ? body.password : '';
+  if (username.length < 3 || username.length > 191 || /\s/u.test(username)) {
+    throw new WorkflowError('El usuario debe tener entre 3 y 191 caracteres y no contener espacios.', 400);
+  }
+  if (displayName.length < 2 || displayName.length > 255) {
+    throw new WorkflowError('El nombre debe tener entre 2 y 255 caracteres.', 400);
+  }
+  if (!USER_ROLES.includes(role as (typeof USER_ROLES)[number])) {
+    throw new WorkflowError('Seleccione un rol válido.', 400);
+  }
+  if ((passwordRequired || password) && password.length < 12) {
+    throw new WorkflowError('La contraseña debe tener al menos 12 caracteres.', 400);
+  }
+  return { username, displayName, role, ...(password ? { password } : {}) };
+}
+
+function isDuplicateEntry(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ER_DUP_ENTRY');
 }
 
 function safeContribution(value: unknown, fallback: number): number {
@@ -416,7 +457,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(cors, {
     origin: true,
     credentials: true,
-    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   });
   await app.register(multipart, {
     limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 8 },
@@ -460,6 +501,21 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const requestUser = (request: FastifyRequest): AuthUser | undefined =>
     (request as FastifyRequest & { authUser?: AuthUser }).authUser;
 
+  const requireAdmin = (request: FastifyRequest): AuthUser => {
+    const user = requestUser(request);
+    if (!user || user.role !== 'ADMIN') throw new WorkflowError('Solo un administrador puede gestionar usuarios.', 403);
+    return user;
+  };
+
+  const ensureAnotherAdmin = async (targetId: string): Promise<void> => {
+    if (!mysqlStore) throw new WorkflowError('La gestión de usuarios requiere la conexión MySQL.', 503);
+    const users = await mysqlStore.listUsers();
+    const target = users.find((user) => user.id === targetId);
+    if (target?.active && target.role === 'ADMIN' && users.filter((user) => user.active && user.role === 'ADMIN').length <= 1) {
+      throw new WorkflowError('Debe conservar al menos un administrador activo.', 409);
+    }
+  };
+
   app.post<{ Body: LoginBody }>('/api/auth/login', async (request, reply) => {
     if (!mysqlStore) throw new WorkflowError('La autenticación requiere la conexión MySQL.', 503);
     const username = typeof request.body?.username === 'string' ? request.body.username : '';
@@ -485,6 +541,66 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     await mysqlStore?.deleteSession(request.cookies.occidente_session);
     reply.clearCookie('occidente_session', { path: '/' });
     return { ok: true };
+  });
+
+  app.get('/api/users', async (request) => {
+    requireAdmin(request);
+    if (!mysqlStore) throw new WorkflowError('La gestión de usuarios requiere la conexión MySQL.', 503);
+    return { items: await mysqlStore.listUsers() };
+  });
+
+  app.post<{ Body: UserCreateBody }>('/api/users', async (request, reply) => {
+    requireAdmin(request);
+    if (!mysqlStore) throw new WorkflowError('La gestión de usuarios requiere la conexión MySQL.', 503);
+    const user = userFields(request.body, true);
+    try {
+      const created = await mysqlStore.createManagedUser({ ...user, password: user.password as string });
+      return reply.status(201).send({ user: created });
+    } catch (error) {
+      if (isDuplicateEntry(error)) throw new WorkflowError('Ya existe un usuario con ese identificador.', 409);
+      throw error;
+    }
+  });
+
+  app.patch<{ Params: UserParams; Body: UserUpdateBody }>('/api/users/:id', async (request) => {
+    const actor = requireAdmin(request);
+    if (!mysqlStore) throw new WorkflowError('La gestión de usuarios requiere la conexión MySQL.', 503);
+    const fields = userFields(request.body, false);
+    const current = (await mysqlStore.listUsers()).find((user) => user.id === request.params.id);
+    if (!current) throw new WorkflowError('No se encontró el usuario.', 404);
+    const active = typeof request.body?.active === 'boolean' ? request.body.active : current.active;
+    if (actor.id === request.params.id && !active) {
+      throw new WorkflowError('No puede desactivar el usuario con el que inició sesión.', 400);
+    }
+    if (current.active && current.role === 'ADMIN' && (!active || fields.role !== 'ADMIN')) {
+      await ensureAnotherAdmin(current.id);
+    }
+    try {
+      const updated = await mysqlStore.updateManagedUser(request.params.id, { ...fields, active });
+      if (!updated) throw new WorkflowError('No se encontró el usuario.', 404);
+      return { user: updated };
+    } catch (error) {
+      if (isDuplicateEntry(error)) throw new WorkflowError('Ya existe un usuario con ese identificador.', 409);
+      if (error instanceof UserManagementError) throw new WorkflowError(error.message, 409);
+      throw error;
+    }
+  });
+
+  app.delete<{ Params: UserParams }>('/api/users/:id', async (request) => {
+    const actor = requireAdmin(request);
+    if (!mysqlStore) throw new WorkflowError('La gestión de usuarios requiere la conexión MySQL.', 503);
+    if (actor.id === request.params.id) {
+      throw new WorkflowError('No puede desactivar el usuario con el que inició sesión.', 400);
+    }
+    await ensureAnotherAdmin(request.params.id);
+    try {
+      const user = await mysqlStore.deactivateManagedUser(request.params.id);
+      if (!user) throw new WorkflowError('No se encontró el usuario.', 404);
+      return { user };
+    } catch (error) {
+      if (error instanceof UserManagementError) throw new WorkflowError(error.message, 409);
+      throw error;
+    }
   });
 
   app.get('/api/health', async () => ({

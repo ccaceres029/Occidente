@@ -12,7 +12,9 @@ import type {
   HealthData,
   IncomingRequest,
   MailSettings,
+  ManagedUser,
   PolicyCatalog,
+  UserInput,
   ValidationResponse,
 } from './types';
 
@@ -72,6 +74,13 @@ export const api = {
     }),
   me: () => request<{ user: AuthUser }>('/auth/me'),
   logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
+  users: () => request<{ items: ManagedUser[] }>('/users'),
+  createUser: (input: UserInput & { password: string }) =>
+    request<{ user: ManagedUser }>('/users', { method: 'POST', body: JSON.stringify(input) }),
+  updateUser: (id: string, input: UserInput) =>
+    request<{ user: ManagedUser }>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  deactivateUser: (id: string) =>
+    request<{ user: ManagedUser }>(`/users/${id}`, { method: 'DELETE' }),
   health: () => request<HealthData>('/health'),
   dashboard: () => request<DashboardData>('/dashboard'),
   resetDemoData: () =>

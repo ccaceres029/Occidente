@@ -9,6 +9,7 @@ import PoliciesPage from './pages/PoliciesPage';
 import LoginPage from './pages/LoginPage';
 import IncomingRequestsPage from './pages/IncomingRequestsPage';
 import EmailSettingsPage from './pages/EmailSettingsPage';
+import UsersPage from './pages/UsersPage';
 import { api } from './api';
 import type { AuthUser } from './types';
 
@@ -51,6 +52,7 @@ export default function App() {
         <Route path="politicas" element={<PoliciesPage />} />
         <Route path="solicitudes" element={<IncomingRequestsPage />} />
         <Route path="configuracion/correo" element={<EmailSettingsPage />} />
+        <Route path="configuracion/usuarios" element={user.role === 'ADMIN' ? <UsersPage currentUser={user} /> : <Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

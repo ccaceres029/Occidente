@@ -15,6 +15,20 @@ export interface AuthUser {
   role: string;
 }
 
+export interface ManagedUser extends AuthUser {
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserInput {
+  username: string;
+  displayName: string;
+  role: string;
+  active?: boolean;
+  password?: string;
+}
+
 export interface MailSettings {
   emailAddress: string;
   username: string;
