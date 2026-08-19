@@ -252,7 +252,7 @@ export class MysqlStore implements CaseStore {
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS daily_case_sequences (
         case_date DATE PRIMARY KEY,
-        last_value INT UNSIGNED NOT NULL,
+        sequence_value INT UNSIGNED NOT NULL,
         updated_at DATETIME(3) NOT NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     `);

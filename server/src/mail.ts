@@ -537,18 +537,18 @@ export class MailService {
 
   private async nextDailySequence(connection: PoolConnection, date: string): Promise<number> {
     const [rows] = await connection.query<RowDataPacket[]>(
-      'SELECT last_value FROM daily_case_sequences WHERE case_date=? FOR UPDATE',
+      'SELECT sequence_value FROM daily_case_sequences WHERE case_date=? FOR UPDATE',
       [date],
     );
-    const next = rows[0] ? Number(rows[0].last_value) + 1 : 1;
+    const next = rows[0] ? Number(rows[0].sequence_value) + 1 : 1;
     if (rows[0]) {
       await connection.query(
-        'UPDATE daily_case_sequences SET last_value=?, updated_at=UTC_TIMESTAMP(3) WHERE case_date=?',
+        'UPDATE daily_case_sequences SET sequence_value=?, updated_at=UTC_TIMESTAMP(3) WHERE case_date=?',
         [next, date],
       );
     } else {
       await connection.query(
-        'INSERT INTO daily_case_sequences (case_date, last_value, updated_at) VALUES (?, ?, UTC_TIMESTAMP(3))',
+        'INSERT INTO daily_case_sequences (case_date, sequence_value, updated_at) VALUES (?, ?, UTC_TIMESTAMP(3))',
         [date, next],
       );
     }
