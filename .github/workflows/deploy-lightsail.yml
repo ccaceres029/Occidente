@@ -1,0 +1,77 @@
+name: Deploy Occidente to Lightsail
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: occidente-lightsail
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.16.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Configure SSH
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$LIGHTSAIL_SSH_KEY" > ~/.ssh/occidente_lightsail
+          chmod 600 ~/.ssh/occidente_lightsail
+          ssh-keyscan -H "$LIGHTSAIL_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync project
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+        run: |
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude '.env.*' \
+            --exclude 'node_modules' \
+            --exclude 'server/data/demo-db.json' \
+            --exclude 'server/data/uploads' \
+            --exclude 'server/data/preview-cache' \
+            --exclude '/dist' \
+            --exclude '/output' \
+            --exclude 'tmp' \
+            --exclude 'coverage' \
+            --exclude '.DS_Store' \
+            --exclude '-.jpg' \
+            -e "ssh -i ~/.ssh/occidente_lightsail" \
+            ./ "$LIGHTSAIL_USER@$LIGHTSAIL_HOST:/var/www/Occidente/app/"
+
+      - name: Activate release
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+        run: |
+          ssh -i ~/.ssh/occidente_lightsail "$LIGHTSAIL_USER@$LIGHTSAIL_HOST" \
+            'APP_ROOT=/var/www/Occidente bash /var/www/Occidente/app/deploy/lightsail/activate.sh'

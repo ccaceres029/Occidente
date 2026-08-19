@@ -1,0 +1,18 @@
+[Unit]
+Description=AFPC Occidente API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/Occidente/app
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3001
+ExecStart=/usr/bin/node /var/www/Occidente/app/server/dist/index.js
+Restart=always
+RestartSec=5
+User=ubuntu
+Group=ubuntu
+
+[Install]
+WantedBy=multi-user.target
