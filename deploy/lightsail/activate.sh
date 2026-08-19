@@ -7,6 +7,8 @@ SHARED_DIR="${SHARED_DIR:-$APP_ROOT/shared}"
 DATA_DIR="$SHARED_DIR/server-data"
 SERVICE_FILE="/etc/systemd/system/occidente.service"
 NGINX_FILE="/etc/nginx/sites-available/occidente.appsmacao.biz"
+TLS_CERT="/etc/letsencrypt/live/occidente.appsmacao.biz/fullchain.pem"
+TLS_KEY="/etc/letsencrypt/live/occidente.appsmacao.biz/privkey.pem"
 
 cd "$APP_DIR"
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -25,7 +27,11 @@ sudo env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare pnpm@11.16.0 --activ
 pnpm install --prod --frozen-lockfile
 
 sudo install -m 0644 "$APP_DIR/deploy/lightsail/occidente.service" "$SERVICE_FILE"
-sudo install -m 0644 "$APP_DIR/deploy/lightsail/nginx-occidente.conf" "$NGINX_FILE"
+if sudo test -f "$TLS_CERT" && sudo test -f "$TLS_KEY"; then
+  sudo install -m 0644 "$APP_DIR/deploy/lightsail/nginx-occidente-ssl.conf" "$NGINX_FILE"
+else
+  sudo install -m 0644 "$APP_DIR/deploy/lightsail/nginx-occidente.conf" "$NGINX_FILE"
+fi
 sudo ln -sfn "$NGINX_FILE" /etc/nginx/sites-enabled/occidente.appsmacao.biz
 
 sudo nginx -t
