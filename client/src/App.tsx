@@ -10,6 +10,8 @@ import LoginPage from './pages/LoginPage';
 import IncomingRequestsPage from './pages/IncomingRequestsPage';
 import EmailSettingsPage from './pages/EmailSettingsPage';
 import UsersPage from './pages/UsersPage';
+import GeneratedCasesPage from './pages/GeneratedCasesPage';
+import GeneratedCaseDetailPage from './pages/GeneratedCaseDetailPage';
 import { api } from './api';
 import type { AuthUser } from './types';
 
@@ -51,6 +53,8 @@ export default function App() {
         <Route path="casos/:id" element={<CaseDetailPage />} />
         <Route path="politicas" element={<PoliciesPage />} />
         <Route path="solicitudes" element={<IncomingRequestsPage />} />
+        <Route path="casos-generados" element={<GeneratedCasesPage />} />
+        <Route path="casos-generados/:id" element={<GeneratedCaseDetailPage currentUser={user} />} />
         <Route path="configuracion/correo" element={<EmailSettingsPage />} />
         <Route path="configuracion/usuarios" element={user.role === 'ADMIN' ? <UsersPage currentUser={user} /> : <Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

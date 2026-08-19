@@ -10,6 +10,8 @@ import type {
   DashboardData,
   DocumentAiInsights,
   HealthData,
+  GeneratedCaseDetail,
+  GeneratedCaseSummary,
   IncomingRequest,
   MailSettings,
   ManagedUser,
@@ -91,7 +93,13 @@ export const api = {
     request<MailSettings>('/settings/email', { method: 'PUT', body: JSON.stringify(settings) }),
   testEmailSettings: () => request<{ imap: 'OK'; smtp: 'OK' }>('/settings/email/test', { method: 'POST' }),
   incomingRequests: () => request<{ items: IncomingRequest[] }>('/incoming-requests'),
-  syncIncomingRequests: () => request<{ imported: number; total: number }>('/incoming-requests/sync', { method: 'POST' }),
+  syncIncomingRequests: () => request<{ imported: number; generated: number; documents: number; total: number }>('/incoming-requests/sync', { method: 'POST' }),
+  generatedCases: () => request<{ items: GeneratedCaseSummary[] }>('/generated-cases'),
+  generatedCase: (id: string) => request<{ case: GeneratedCaseDetail }>(`/generated-cases/${id}`),
+  generatedDocumentUrl: (caseId: string, documentId: string) =>
+    `${API_ROOT}/generated-cases/${caseId}/documents/${documentId}/content`,
+  deleteGeneratedCase: (id: string) =>
+    request<{ ok: true; code: string; deletedObjects: number }>(`/generated-cases/${id}`, { method: 'DELETE' }),
   cases: (filters?: { status?: string; search?: string }) => {
     const params = new URLSearchParams();
     if (filters?.status) params.set('status', filters.status);

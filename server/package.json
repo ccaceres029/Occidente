@@ -1,6 +1,6 @@
 {
   "name": "@occi/server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "API local para el demo de afiliaciones AFPC Occidente",
@@ -11,6 +11,7 @@
     "test": "tsx --test test/**/*.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1112.0",
     "@fastify/cookie": "^11.1.2",
     "@fastify/cors": "^11.1.0",
     "@fastify/multipart": "^9.2.1",

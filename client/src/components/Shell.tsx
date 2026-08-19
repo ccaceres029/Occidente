@@ -6,6 +6,7 @@ import {
   ClipboardList,
   Inbox,
   FilePlus2,
+  FolderKanban,
   HelpCircle,
   LayoutDashboard,
   Menu,
@@ -22,9 +23,12 @@ import type { AuthUser } from '../types';
 import { OccidenteMark } from './Brand';
 import { Badge } from './ui';
 import { spanishDynamicText } from '../utils';
+import { APP_VERSION } from '../version';
 
 const titles: Array<[RegExp, string, string]> = [
   [/^\/$/, 'Resumen operativo', 'Visión general de las afiliaciones'],
+  [/^\/casos-generados\/[^/]+/, 'Caso generado', 'Correo recibido y documentos almacenados'],
+  [/^\/casos-generados/, 'Casos generados', 'Solicitudes codificadas desde el correo'],
   [/^\/casos\/nuevo/, 'Nueva afiliación', 'Captura guiada y prevalidación'],
   [/^\/casos\/[^/]+/, 'Expediente 360', 'Análisis, decisión y trazabilidad'],
   [/^\/casos/, 'Bandeja de afiliaciones', 'Prioriza y gestiona los expedientes'],
@@ -103,6 +107,7 @@ export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: ()
           <NavLink to="/casos" end><ClipboardList size={19} /><span>Bandeja de casos</span>{queueTotal !== null && <kbd>{queueTotal}</kbd>}</NavLink>
           <NavLink to="/casos/nuevo"><FilePlus2 size={19} /><span>Nueva afiliación</span></NavLink>
           <NavLink to="/solicitudes"><Inbox size={19} /><span>Solicitudes entrantes</span></NavLink>
+          <NavLink to="/casos-generados"><FolderKanban size={19} /><span>Casos generados</span></NavLink>
 
           <span className="nav-group-label nav-group-label--spaced">Control</span>
           <NavLink to="/politicas"><ShieldCheck size={19} /><span>Políticas y reglas</span><em>Demo</em></NavLink>
@@ -122,6 +127,7 @@ export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: ()
             <span><strong>{user.displayName}</strong><small>{user.role}</small></span>
             <button type="button" onClick={() => void logout()} title="Cerrar sesión" aria-label="Cerrar sesión"><LogOut size={16} /></button>
           </div>
+          <span className="portal-version">Portal v{APP_VERSION}</span>
         </div>
       </aside>
 

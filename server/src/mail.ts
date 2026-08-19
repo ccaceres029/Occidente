@@ -1,8 +1,9 @@
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ImapFlow } from 'imapflow';
-import { simpleParser } from 'mailparser';
+import { simpleParser, type Attachment, type ParsedMail } from 'mailparser';
 import nodemailer from 'nodemailer';
-import type { Pool, RowDataPacket } from 'mysql2/promise';
+import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import { ObjectStorage } from './objectStorage.js';
 
 export interface MailSettings {
   emailAddress: string;
@@ -47,6 +48,34 @@ export interface IncomingRequest {
   hasAttachments: boolean;
   attachmentCount: number;
   status: string;
+  caseId?: string;
+  caseCode?: string;
+}
+
+export interface GeneratedCaseDocument {
+  id: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  checksumSha256: string;
+  createdAt: string;
+}
+
+export interface GeneratedCaseSummary {
+  id: string;
+  code: string;
+  status: string;
+  subject: string;
+  senderName?: string;
+  senderEmail?: string;
+  receivedAt: string;
+  documentCount: number;
+  createdAt: string;
+}
+
+export interface GeneratedCaseDetail extends GeneratedCaseSummary {
+  incomingRequestId: string;
+  documents: GeneratedCaseDocument[];
 }
 
 interface SettingsRow extends RowDataPacket {
@@ -79,6 +108,33 @@ interface IncomingRow extends RowDataPacket {
   has_attachments: number;
   attachment_count: number;
   status: string;
+  case_id: string | null;
+  case_code: string | null;
+}
+
+interface GeneratedCaseRow extends RowDataPacket {
+  id: string;
+  code: string;
+  incoming_request_id: string;
+  status: string;
+  subject: string;
+  sender_name: string | null;
+  sender_email: string | null;
+  received_at: Date;
+  document_count: number;
+  created_at: Date;
+}
+
+interface GeneratedDocumentRow extends RowDataPacket {
+  id: string;
+  case_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  checksum_sha256: string;
+  s3_bucket: string;
+  s3_key: string;
+  created_at: Date;
 }
 
 function publicSettings(row: SettingsRow): MailSettings {
@@ -114,7 +170,52 @@ function publicIncoming(row: IncomingRow): IncomingRequest {
     hasAttachments: Boolean(row.has_attachments),
     attachmentCount: Number(row.attachment_count),
     status: row.status,
+    ...(row.case_id ? { caseId: row.case_id } : {}),
+    ...(row.case_code ? { caseCode: row.case_code } : {}),
   };
+}
+
+function publicGeneratedCase(row: GeneratedCaseRow): GeneratedCaseSummary {
+  return {
+    id: row.id,
+    code: row.code,
+    status: row.status,
+    subject: row.subject,
+    ...(row.sender_name ? { senderName: row.sender_name } : {}),
+    ...(row.sender_email ? { senderEmail: row.sender_email } : {}),
+    receivedAt: row.received_at.toISOString(),
+    documentCount: Number(row.document_count),
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+function publicGeneratedDocument(row: GeneratedDocumentRow): GeneratedCaseDocument {
+  return {
+    id: row.id,
+    filename: row.filename,
+    contentType: row.content_type,
+    sizeBytes: Number(row.size_bytes),
+    checksumSha256: row.checksum_sha256,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+function caseDate(receivedAt: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Tegucigalpa',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(receivedAt);
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value || '';
+  return `${value('year')}-${value('month')}-${value('day')}`;
+}
+
+function safeAttachmentName(attachment: Attachment, index: number): string {
+  const source = attachment.filename?.trim() || `adjunto-${index + 1}`;
+  const normalized = source.normalize('NFD').replaceAll(/[\u0300-\u036f]/gu, '');
+  const safe = normalized.replaceAll(/[^a-zA-Z0-9._-]+/gu, '-').replaceAll(/^-+|-+$/gu, '').slice(0, 180);
+  return `${String(index + 1).padStart(3, '0')}-${safe || `adjunto-${index + 1}`}`;
 }
 
 function encryptSecret(value: string, key: Buffer): string {
@@ -135,7 +236,15 @@ function decryptSecret(value: string, key: Buffer): string {
 export class MailService {
   private syncing = false;
 
-  constructor(private readonly pool: Pool, private readonly credentialsKey?: Buffer) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly credentialsKey?: Buffer,
+    private readonly objectStorage?: ObjectStorage,
+  ) {}
+
+  get storageConfigured(): boolean {
+    return Boolean(this.objectStorage);
+  }
 
   async getSettings(): Promise<MailSettings> {
     return publicSettings(await this.settingsRow());
@@ -181,25 +290,113 @@ export class MailService {
   async listIncoming(limit = 100): Promise<IncomingRequest[]> {
     const safeLimit = Math.max(1, Math.min(250, Math.trunc(limit)));
     const [rows] = await this.pool.query<IncomingRow[]>(
-      `SELECT id, message_id, mailbox_uid, subject, sender_name, sender_email, received_at,
-        snippet, has_attachments, attachment_count, status
-       FROM incoming_requests ORDER BY received_at DESC LIMIT ?`,
+      `SELECT incoming.id, incoming.message_id, incoming.mailbox_uid, incoming.subject,
+        incoming.sender_name, incoming.sender_email, incoming.received_at, incoming.snippet,
+        incoming.has_attachments, incoming.attachment_count, incoming.status,
+        generated.id AS case_id, generated.code AS case_code
+       FROM incoming_requests incoming
+       LEFT JOIN generated_cases generated ON generated.incoming_request_id=incoming.id
+       ORDER BY incoming.received_at DESC LIMIT ?`,
       [safeLimit],
     );
     return rows.map(publicIncoming);
   }
 
-  async syncIncoming(limit = 50): Promise<{ imported: number; total: number }> {
-    if (this.syncing) return { imported: 0, total: (await this.listIncoming(250)).length };
+  async listGeneratedCases(limit = 250): Promise<GeneratedCaseSummary[]> {
+    const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const [rows] = await this.pool.query<GeneratedCaseRow[]>(
+      `SELECT generated.id, generated.code, generated.incoming_request_id, generated.status,
+        generated.subject, generated.sender_name, generated.sender_email, generated.received_at,
+        generated.created_at, COUNT(documents.id) AS document_count
+       FROM generated_cases generated
+       LEFT JOIN generated_case_documents documents ON documents.case_id=generated.id
+       GROUP BY generated.id
+       ORDER BY generated.received_at DESC, generated.code DESC LIMIT ?`,
+      [safeLimit],
+    );
+    return rows.map(publicGeneratedCase);
+  }
+
+  async getGeneratedCase(id: string): Promise<GeneratedCaseDetail | undefined> {
+    const [caseRows] = await this.pool.query<GeneratedCaseRow[]>(
+      `SELECT generated.id, generated.code, generated.incoming_request_id, generated.status,
+        generated.subject, generated.sender_name, generated.sender_email, generated.received_at,
+        generated.created_at, COUNT(documents.id) AS document_count
+       FROM generated_cases generated
+       LEFT JOIN generated_case_documents documents ON documents.case_id=generated.id
+       WHERE generated.id=? GROUP BY generated.id`,
+      [id],
+    );
+    const row = caseRows[0];
+    if (!row) return undefined;
+    const [documentRows] = await this.pool.query<GeneratedDocumentRow[]>(
+      `SELECT id, case_id, filename, content_type, size_bytes, checksum_sha256,
+        s3_bucket, s3_key, created_at
+       FROM generated_case_documents WHERE case_id=? ORDER BY created_at, filename`,
+      [id],
+    );
+    return {
+      ...publicGeneratedCase(row),
+      incomingRequestId: row.incoming_request_id,
+      documents: documentRows.map(publicGeneratedDocument),
+    };
+  }
+
+  async getGeneratedDocument(caseId: string, documentId: string): Promise<{ document: GeneratedCaseDocument; content: Buffer } | undefined> {
+    if (!this.objectStorage) throw new Error('El almacenamiento S3 no está configurado.');
+    const [rows] = await this.pool.query<GeneratedDocumentRow[]>(
+      `SELECT id, case_id, filename, content_type, size_bytes, checksum_sha256,
+        s3_bucket, s3_key, created_at
+       FROM generated_case_documents WHERE id=? AND case_id=? LIMIT 1`,
+      [documentId, caseId],
+    );
+    const row = rows[0];
+    if (!row) return undefined;
+    return { document: publicGeneratedDocument(row), content: await this.objectStorage.getObject(row.s3_key) };
+  }
+
+  async deleteGeneratedCase(id: string): Promise<{ code: string; deletedObjects: number } | undefined> {
+    if (!this.objectStorage) throw new Error('El almacenamiento S3 no está configurado.');
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.query<GeneratedCaseRow[]>(
+        `SELECT generated.id, generated.code, generated.incoming_request_id, generated.status,
+          generated.subject, generated.sender_name, generated.sender_email, generated.received_at,
+          generated.created_at, 0 AS document_count
+         FROM generated_cases generated WHERE generated.id=? LIMIT 1 FOR UPDATE`,
+        [id],
+      );
+      const row = rows[0];
+      if (!row) {
+        await connection.rollback();
+        return undefined;
+      }
+      const deletedObjects = await this.objectStorage.deleteCase(row.code);
+      await connection.query('DELETE FROM incoming_requests WHERE id=?', [row.incoming_request_id]);
+      await connection.commit();
+      return { code: row.code, deletedObjects };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async syncIncoming(limit = 50): Promise<{ imported: number; generated: number; documents: number; total: number }> {
+    if (this.syncing) return { imported: 0, generated: 0, documents: 0, total: (await this.listIncoming(250)).length };
     this.syncing = true;
     let client: ImapFlow | undefined;
     try {
       const account = await this.privateSettings();
-      if (!account.enabled) return { imported: 0, total: (await this.listIncoming(250)).length };
+      if (!account.enabled) return { imported: 0, generated: 0, documents: 0, total: (await this.listIncoming(250)).length };
       client = this.imapClient(account);
       await client.connect();
       const lock = await client.getMailboxLock('INBOX');
       let imported = 0;
+      let generated = 0;
+      let documents = 0;
       try {
         const count = client.mailbox && typeof client.mailbox !== 'boolean' ? client.mailbox.exists : 0;
         if (count > 0) {
@@ -209,18 +406,19 @@ export class MailService {
             const parsed = await simpleParser(message.source);
             const from = parsed.from?.value[0];
             const messageId = (parsed.messageId || message.envelope?.messageId || `${account.username}:${message.uid}`).slice(0, 255);
-            const [result] = await this.pool.query(
-              `INSERT IGNORE INTO incoming_requests
-                (id, message_id, mailbox_uid, subject, sender_name, sender_email, received_at,
-                 snippet, has_attachments, attachment_count, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
-              [randomUUID(), messageId, message.uid, (parsed.subject || '(Sin asunto)').slice(0, 998),
-                from?.name?.slice(0, 255) || null, from?.address?.slice(0, 255) || null,
-                parsed.date || message.envelope?.date || new Date(),
-                parsed.text?.replaceAll(/\s+/gu, ' ').trim().slice(0, 800) || null,
-                parsed.attachments.length > 0, parsed.attachments.length],
-            );
-            if ('affectedRows' in result) imported += Number(result.affectedRows);
+            const result = await this.createCaseFromMessage({
+              messageId,
+              mailboxUid: message.uid,
+              subject: (parsed.subject || '(Sin asunto)').slice(0, 998),
+              senderName: from?.name?.slice(0, 255),
+              senderEmail: from?.address?.slice(0, 255),
+              receivedAt: parsed.date || message.envelope?.date || new Date(),
+              snippet: parsed.text?.replaceAll(/\s+/gu, ' ').trim().slice(0, 800),
+              parsed,
+            });
+            imported += result.imported;
+            generated += result.generated;
+            documents += result.documents;
           }
         }
       } finally {
@@ -230,7 +428,7 @@ export class MailService {
         `UPDATE email_settings SET last_sync_at=UTC_TIMESTAMP(3), last_imap_status='OK',
          last_error=NULL WHERE id=1`,
       );
-      return { imported, total: (await this.listIncoming(250)).length };
+      return { imported, generated, documents, total: (await this.listIncoming(250)).length };
     } catch (error) {
       const safeError = this.safeMailError(error);
       await this.pool.query(
@@ -242,6 +440,119 @@ export class MailService {
       this.syncing = false;
       if (client?.usable) await client.logout().catch(() => undefined);
     }
+  }
+
+  private async createCaseFromMessage(input: {
+    messageId: string;
+    mailboxUid: number;
+    subject: string;
+    senderName?: string;
+    senderEmail?: string;
+    receivedAt: Date;
+    snippet?: string;
+    parsed: ParsedMail;
+  }): Promise<{ imported: number; generated: number; documents: number }> {
+    if (input.parsed.attachments.length && !this.objectStorage) {
+      throw new Error('El correo contiene adjuntos, pero el almacenamiento S3 no está configurado.');
+    }
+    const connection = await this.pool.getConnection();
+    let caseCode: string | undefined;
+    try {
+      await connection.beginTransaction();
+      const [incomingRows] = await connection.query<RowDataPacket[]>(
+        'SELECT id FROM incoming_requests WHERE message_id=? FOR UPDATE',
+        [input.messageId],
+      );
+      let incomingId = typeof incomingRows[0]?.id === 'string' ? incomingRows[0].id : '';
+      let imported = 0;
+      if (!incomingId) {
+        incomingId = randomUUID();
+        await connection.query(
+          `INSERT INTO incoming_requests
+            (id, message_id, mailbox_uid, subject, sender_name, sender_email, received_at,
+             snippet, has_attachments, attachment_count, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+          [incomingId, input.messageId, input.mailboxUid, input.subject, input.senderName || null,
+            input.senderEmail || null, input.receivedAt, input.snippet || null,
+            input.parsed.attachments.length > 0, input.parsed.attachments.length],
+        );
+        imported = 1;
+      }
+
+      const [existingCases] = await connection.query<RowDataPacket[]>(
+        'SELECT id FROM generated_cases WHERE incoming_request_id=? FOR UPDATE',
+        [incomingId],
+      );
+      if (existingCases[0]) {
+        await connection.commit();
+        return { imported, generated: 0, documents: 0 };
+      }
+
+      const date = caseDate(input.receivedAt);
+      const sequence = await this.nextDailySequence(connection, date);
+      caseCode = `AFPC-${date.replaceAll('-', '')}-${String(sequence).padStart(5, '0')}`;
+      const generatedId = randomUUID();
+      await connection.query(
+        `INSERT INTO generated_cases
+          (id, code, incoming_request_id, status, subject, sender_name, sender_email,
+           received_at, created_at, updated_at)
+         VALUES (?, ?, ?, 'RECEIVED', ?, ?, ?, ?, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+        [generatedId, caseCode, incomingId, input.subject, input.senderName || null,
+          input.senderEmail || null, input.receivedAt],
+      );
+
+      for (const [index, attachment] of input.parsed.attachments.entries()) {
+        const filename = safeAttachmentName(attachment, index);
+        const stored = await this.objectStorage?.putCaseDocument(
+          caseCode,
+          filename,
+          attachment.contentType,
+          attachment.content,
+        );
+        if (!stored) throw new Error('No fue posible guardar el documento en S3.');
+        await connection.query(
+          `INSERT INTO generated_case_documents
+            (id, case_id, filename, content_type, size_bytes, checksum_sha256,
+             s3_bucket, s3_key, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))`,
+          [randomUUID(), generatedId, attachment.filename?.slice(0, 512) || filename,
+            attachment.contentType || 'application/octet-stream', attachment.size,
+            createHash('sha256').update(attachment.content).digest('hex'), stored.bucket, stored.key],
+        );
+      }
+      await connection.query(
+        `UPDATE incoming_requests SET status='CASE_CREATED', updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
+        [incomingId],
+      );
+      await connection.commit();
+      return { imported, generated: 1, documents: input.parsed.attachments.length };
+    } catch (error) {
+      await connection.rollback();
+      if (caseCode && this.objectStorage) await this.objectStorage.deleteCase(caseCode).catch(() => undefined);
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  private async nextDailySequence(connection: PoolConnection, date: string): Promise<number> {
+    const [rows] = await connection.query<RowDataPacket[]>(
+      'SELECT last_value FROM daily_case_sequences WHERE case_date=? FOR UPDATE',
+      [date],
+    );
+    const next = rows[0] ? Number(rows[0].last_value) + 1 : 1;
+    if (rows[0]) {
+      await connection.query(
+        'UPDATE daily_case_sequences SET last_value=?, updated_at=UTC_TIMESTAMP(3) WHERE case_date=?',
+        [next, date],
+      );
+    } else {
+      await connection.query(
+        'INSERT INTO daily_case_sequences (case_date, last_value, updated_at) VALUES (?, ?, UTC_TIMESTAMP(3))',
+        [date, next],
+      );
+    }
+    return next;
   }
 
   private async settingsRow(): Promise<SettingsRow> {

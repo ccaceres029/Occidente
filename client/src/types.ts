@@ -59,6 +59,34 @@ export interface IncomingRequest {
   hasAttachments: boolean;
   attachmentCount: number;
   status: string;
+  caseId?: string;
+  caseCode?: string;
+}
+
+export interface GeneratedCaseDocument {
+  id: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  checksumSha256: string;
+  createdAt: string;
+}
+
+export interface GeneratedCaseSummary {
+  id: string;
+  code: string;
+  status: string;
+  subject: string;
+  senderName?: string;
+  senderEmail?: string;
+  receivedAt: string;
+  documentCount: number;
+  createdAt: string;
+}
+
+export interface GeneratedCaseDetail extends GeneratedCaseSummary {
+  incomingRequestId: string;
+  documents: GeneratedCaseDocument[];
 }
 
 export interface ClientData {
@@ -203,6 +231,8 @@ export interface HealthData {
   geminiConfigured: boolean;
   storage?: string;
   database?: string;
+  version?: string;
+  objectStorage?: string;
 }
 
 export interface PolicyRule {

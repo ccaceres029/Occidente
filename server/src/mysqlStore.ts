@@ -249,6 +249,47 @@ export class MysqlStore implements CaseStore {
         INDEX idx_incoming_status_received (status, received_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS daily_case_sequences (
+        case_date DATE PRIMARY KEY,
+        last_value INT UNSIGNED NOT NULL,
+        updated_at DATETIME(3) NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS generated_cases (
+        id CHAR(36) PRIMARY KEY,
+        code VARCHAR(64) NOT NULL UNIQUE,
+        incoming_request_id CHAR(36) NOT NULL UNIQUE,
+        status VARCHAR(30) NOT NULL DEFAULT 'RECEIVED',
+        subject VARCHAR(998) NOT NULL,
+        sender_name VARCHAR(255) NULL,
+        sender_email VARCHAR(255) NULL,
+        received_at DATETIME(3) NOT NULL,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        INDEX idx_generated_received (received_at),
+        INDEX idx_generated_status_received (status, received_at),
+        CONSTRAINT fk_generated_incoming FOREIGN KEY (incoming_request_id)
+          REFERENCES incoming_requests(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS generated_case_documents (
+        id CHAR(36) PRIMARY KEY,
+        case_id CHAR(36) NOT NULL,
+        filename VARCHAR(512) NOT NULL,
+        content_type VARCHAR(191) NOT NULL,
+        size_bytes BIGINT UNSIGNED NOT NULL,
+        checksum_sha256 CHAR(64) NOT NULL,
+        s3_bucket VARCHAR(255) NOT NULL,
+        s3_key VARCHAR(512) NOT NULL UNIQUE,
+        created_at DATETIME(3) NOT NULL,
+        INDEX idx_generated_documents_case (case_id),
+        CONSTRAINT fk_generated_document_case FOREIGN KEY (case_id)
+          REFERENCES generated_cases(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `);
     await this.pool.query(
       `INSERT INTO email_settings
         (id, email_address, username, incoming_host, incoming_port, incoming_secure,

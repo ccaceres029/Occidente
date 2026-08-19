@@ -53,6 +53,12 @@ export interface MailRuntimeConfig {
   syncIntervalSeconds: number;
 }
 
+export interface ObjectStorageConfig {
+  bucket: string;
+  region: string;
+  prefix: string;
+}
+
 function combinedEnvironment(): Record<string, string | undefined> {
   const configuredPath = process.env.MACAOIT_SECRETS_PATH?.trim() || CENTRAL_MACAOIT_ENV;
   return { ...parseEnvFile(configuredPath), ...process.env };
@@ -103,6 +109,19 @@ export function resolveMailRuntimeConfig(): MailRuntimeConfig {
   return {
     credentialsKey,
     syncIntervalSeconds: Math.max(30, Number(env.MAIL_SYNC_INTERVAL_SECONDS || 60)),
+  };
+}
+
+export function resolveObjectStorageConfig(): ObjectStorageConfig | undefined {
+  const env = combinedEnvironment();
+  const bucket = env.OCCIDENTE_S3_BUCKET?.trim();
+  if (!bucket) return undefined;
+  const configuredPrefix = env.OCCIDENTE_S3_PREFIX?.trim().replace(/^\/+|\/+$/gu, '');
+  const prefix = configuredPrefix || 'demo-occi';
+  return {
+    bucket,
+    region: env.AWS_REGION?.trim() || env.AWS_DEFAULT_REGION?.trim() || 'us-east-2',
+    prefix,
   };
 }
 

@@ -18,8 +18,10 @@ import {
   resolveDatabaseConfig,
   resolveGeminiConfig,
   resolveMailRuntimeConfig,
+  resolveObjectStorageConfig,
   type DatabaseConfig,
   type GeminiConfig,
+  type ObjectStorageConfig,
 } from './config.js';
 import { generateSyntheticContract } from './contractPdf.js';
 import { buildCorePayload } from './corePayload.js';
@@ -34,6 +36,7 @@ import { applyVerifiedPdfEvidence, PdfEvidenceLocator } from './pdfEvidenceLocat
 import { STAGE_LABELS, STATUS_LABELS, STATUS_PROGRESS } from './labels.js';
 import { MailService, type MailSettingsInput } from './mail.js';
 import { MysqlStore, UserManagementError, type AuthUser } from './mysqlStore.js';
+import { ObjectStorage } from './objectStorage.js';
 import { getPolicyCatalog } from './policyCatalog.js';
 import { allowedActions, evaluateCaseRules } from './rules.js';
 import { JsonStore, type CaseStore } from './store.js';
@@ -47,6 +50,7 @@ import type {
   ProductProfile,
 } from './types.js';
 import { normalizeAction, transitionCase, WorkflowError } from './workflow.js';
+import { APP_VERSION } from './version.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const defaultDataDir = path.resolve(moduleDir, '../data');
@@ -57,6 +61,7 @@ export interface BuildAppOptions {
   geminiConfig?: GeminiConfig;
   databaseConfig?: DatabaseConfig | null;
   authDisabled?: boolean;
+  objectStorageConfig?: ObjectStorageConfig | null;
 }
 
 interface LoginBody {
@@ -87,6 +92,8 @@ interface CaseParams {
 interface DocumentParams extends CaseParams {
   documentId: string;
 }
+
+interface GeneratedDocumentParams extends DocumentParams {}
 
 interface DocumentPreviewQuery {
   page?: string;
@@ -447,8 +454,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const pdfEvidenceLocator = new PdfEvidenceLocator();
   const geminiConfig = options.geminiConfig ?? resolveGeminiConfig();
   const mailRuntime = resolveMailRuntimeConfig();
+  const objectStorageConfig = options.objectStorageConfig === undefined
+    ? resolveObjectStorageConfig()
+    : options.objectStorageConfig;
+  const objectStorage = objectStorageConfig ? new ObjectStorage(objectStorageConfig) : undefined;
   const mailService = mysqlStore
-    ? new MailService(mysqlStore.databasePool(), mailRuntime.credentialsKey)
+    ? new MailService(mysqlStore.databasePool(), mailRuntime.credentialsKey, objectStorage)
     : undefined;
   const authEnabled = Boolean(mysqlStore && !options.authDisabled);
   await store.initialize();
@@ -503,7 +514,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   const requireAdmin = (request: FastifyRequest): AuthUser => {
     const user = requestUser(request);
-    if (!user || user.role !== 'ADMIN') throw new WorkflowError('Solo un administrador puede gestionar usuarios.', 403);
+    if (!user || user.role !== 'ADMIN') throw new WorkflowError('Solo un administrador puede realizar esta acción.', 403);
     return user;
   };
 
@@ -606,11 +617,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get('/api/health', async () => ({
     status: 'ok',
     service: 'afpc-occidente-demo-api',
+    version: APP_VERSION,
     mode: 'demo-local',
     timestamp: new Date().toISOString(),
     geminiConfigured: geminiConfig.configured,
     storage: store.storageMode,
     database: mysqlStore?.databaseName,
+    objectStorage: mailService?.storageConfigured ? 's3' : 'not-configured',
   }));
 
   app.get('/api/settings/email', async () => {
@@ -646,6 +659,60 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.post('/api/incoming-requests/sync', async () => {
     if (!mailService) throw new WorkflowError('La bandeja requiere la conexión MySQL.', 503);
     return mailService.syncIncoming();
+  });
+
+  app.get<{ Querystring: { limit?: string } }>('/api/generated-cases', async (request) => {
+    if (!mailService) throw new WorkflowError('Los casos generados requieren la conexión MySQL.', 503);
+    return { items: await mailService.listGeneratedCases(Number(request.query.limit || 250)) };
+  });
+
+  app.get<{ Params: CaseParams }>('/api/generated-cases/:id', async (request) => {
+    if (!mailService) throw new WorkflowError('Los casos generados requieren la conexión MySQL.', 503);
+    const generatedCase = await mailService.getGeneratedCase(request.params.id);
+    if (!generatedCase) throw new WorkflowError('No se encontró el caso generado.', 404);
+    return { case: generatedCase };
+  });
+
+  app.get<{ Params: GeneratedDocumentParams }>(
+    '/api/generated-cases/:id/documents/:documentId/content',
+    async (request, reply) => {
+      if (!mailService) throw new WorkflowError('Los documentos requieren la conexión MySQL.', 503);
+      try {
+        const result = await mailService.getGeneratedDocument(request.params.id, request.params.documentId);
+        if (!result) throw new WorkflowError('No se encontró el documento del caso.', 404);
+        const safeFilename = result.document.filename.replaceAll(/[\r\n"]/gu, '_');
+        reply
+          .header('content-type', result.document.contentType)
+          .header('content-length', String(result.content.length))
+          .header('content-disposition', `inline; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(safeFilename)}`)
+          .header('cache-control', 'private, max-age=300')
+          .header('x-document-origin', 's3-private');
+        return reply.send(result.content);
+      } catch (error) {
+        if (error instanceof WorkflowError) throw error;
+        app.log.error({ error, documentId: request.params.documentId }, 'No se pudo recuperar el documento desde S3');
+        throw new WorkflowError('No fue posible recuperar el documento desde S3.', 502);
+      }
+    },
+  );
+
+  app.delete<{ Params: CaseParams }>('/api/generated-cases/:id', async (request) => {
+    const actor = requireAdmin(request);
+    if (!mailService) throw new WorkflowError('Los casos generados requieren la conexión MySQL.', 503);
+    try {
+      const result = await mailService.deleteGeneratedCase(request.params.id);
+      if (!result) throw new WorkflowError('No se encontró el caso generado.', 404);
+      return {
+        ok: true,
+        code: result.code,
+        deletedObjects: result.deletedObjects,
+        deletedBy: actor.displayName,
+      };
+    } catch (error) {
+      if (error instanceof WorkflowError) throw error;
+      app.log.error({ error, caseId: request.params.id }, 'No se pudo eliminar el caso generado en cascada');
+      throw new WorkflowError('No fue posible completar la eliminación en cascada.', 502);
+    }
   });
 
   app.get('/api/dashboard', async () => dashboard(store));

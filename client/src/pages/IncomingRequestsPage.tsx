@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Clock3, Inbox, Mail, Paperclip, RefreshCw, Search } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Toast } from '../components/ui';
 import type { IncomingRequest } from '../types';
@@ -39,7 +40,9 @@ export default function IncomingRequestsPage() {
     try {
       const result = await api.syncIncomingRequests();
       await load();
-      setToast(result.imported ? `${result.imported} solicitud(es) nueva(s) recibida(s).` : 'La bandeja está al día.');
+      setToast(result.generated
+        ? `${result.generated} caso(s) generado(s) con ${result.documents} documento(s).`
+        : result.imported ? `${result.imported} solicitud(es) nueva(s) recibida(s).` : 'La bandeja está al día.');
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : 'No fue posible sincronizar el correo.');
     } finally {
@@ -91,7 +94,9 @@ export default function IncomingRequestsPage() {
                 <p>{item.snippet || 'Mensaje recibido sin contenido de texto.'}</p>
               </div>
               <div className="incoming-row__date"><Clock3 size={14} /><span>{receivedLabel(item.receivedAt)}</span></div>
-              <Badge tone={item.status === 'NEW' ? 'warning' : 'neutral'}>{item.status === 'NEW' ? 'Nueva' : item.status}</Badge>
+              {item.caseId && item.caseCode
+                ? <Link className="incoming-case-link" to={`/casos-generados/${item.caseId}`}>{item.caseCode}</Link>
+                : <Badge tone={item.status === 'NEW' ? 'warning' : 'neutral'}>{item.status === 'NEW' ? 'Nueva' : item.status}</Badge>}
             </article>
           ))}
         </section>
