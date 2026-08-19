@@ -265,6 +265,9 @@ export class MailService {
       secure: account.incomingSecure,
       auth: { user: account.username, pass: account.password },
       logger: false,
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 30_000,
     });
   }
 
@@ -285,9 +288,15 @@ export class MailService {
       port: account.outgoingPort,
       secure: account.outgoingSecure,
       auth: { user: account.username, pass: account.password },
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 30_000,
     });
-    await transport.verify();
-    transport.close();
+    try {
+      await transport.verify();
+    } finally {
+      transport.close();
+    }
   }
 
   private safeMailError(error: unknown): string {
