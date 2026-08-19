@@ -5,6 +5,8 @@ import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
 import type { AuthUser, IncomingRequest } from '../types';
 
+const AUTO_REFRESH_SECONDS = 30;
+
 function receivedLabel(value: string): string {
   return new Intl.DateTimeFormat('es-HN', {
     dateStyle: 'medium',
@@ -29,6 +31,7 @@ export default function IncomingRequestsPage({
   const [confirmDelete, setConfirmDelete] = useState<IncomingRequest | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [savingPreference, setSavingPreference] = useState<'refresh' | 'analysis' | null>(null);
+  const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(AUTO_REFRESH_SECONDS);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -45,8 +48,19 @@ export default function IncomingRequestsPage({
   useEffect(() => { void load(); }, [load]);
 
   useEffect(() => {
+    setSecondsUntilRefresh(AUTO_REFRESH_SECONDS);
     if (!currentUser.autoRefreshIncoming) return;
-    const timer = window.setInterval(() => void load(true), 30_000);
+    let nextRefreshAt = Date.now() + AUTO_REFRESH_SECONDS * 1_000;
+    const timer = window.setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1_000));
+      if (remaining > 0) {
+        setSecondsUntilRefresh(remaining);
+        return;
+      }
+      nextRefreshAt = Date.now() + AUTO_REFRESH_SECONDS * 1_000;
+      setSecondsUntilRefresh(AUTO_REFRESH_SECONDS);
+      void load(true);
+    }, 250);
     return () => window.clearInterval(timer);
   }, [currentUser.autoRefreshIncoming, load]);
 
@@ -140,8 +154,13 @@ export default function IncomingRequestsPage({
         <div>
           <label className="incoming-automation__option">
             <input type="checkbox" checked={currentUser.autoRefreshIncoming} disabled={savingPreference !== null} onChange={(event) => void savePreference('autoRefreshIncoming', event.target.checked)} />
-            <RefreshCw size={17} className={savingPreference === 'refresh' ? 'is-spinning' : ''} />
-            <span><strong>Actualización automática</strong><small>Recarga las solicitudes cada 30 segundos.</small></span>
+            <RefreshCw size={17} className={savingPreference === 'refresh' ? 'is-spinning' : currentUser.autoRefreshIncoming ? 'is-counting' : ''} />
+            <span>
+              <strong>Actualización automática</strong>
+              {currentUser.autoRefreshIncoming
+                ? <small className="incoming-automation__countdown">Próxima actualización en <b key={secondsUntilRefresh}>{secondsUntilRefresh} s</b></small>
+                : <small>Recarga las solicitudes cada 30 segundos.</small>}
+            </span>
           </label>
           <label className="incoming-automation__option">
             <input type="checkbox" checked={currentUser.autoAnalyzeCompleteCases} disabled={savingPreference !== null} onChange={(event) => void savePreference('autoAnalyzeCompleteCases', event.target.checked)} />
