@@ -14,6 +14,11 @@ TLS_KEY="/etc/letsencrypt/live/occidente.appsmacao.biz/privkey.pem"
 cd "$APP_DIR"
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
+if ! command -v pdftoppm >/dev/null 2>&1 || ! command -v pdftotext >/dev/null 2>&1; then
+  sudo apt-get update -qq
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends poppler-utils
+fi
+
 sudo mkdir -p "$APP_DIR" "$DATA_DIR/uploads" "$DATA_DIR/preview-cache"
 sudo chown -R ubuntu:ubuntu "$APP_ROOT"
 chmod 755 "$APP_ROOT" "$APP_DIR" "$APP_DIR/client" "$APP_DIR/client/dist"

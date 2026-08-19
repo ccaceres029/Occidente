@@ -13,7 +13,7 @@ import type {
   SourceOfFundsInsight,
 } from './types.js';
 
-export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.2.0';
+export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.2.1';
 
 export interface GeneratedIntelligenceDocument {
   id: string;
