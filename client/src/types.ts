@@ -39,6 +39,7 @@ export interface MailSettings {
   outgoingPort: number;
   outgoingSecure: boolean;
   enabled: boolean;
+  moveProcessedToTrash: boolean;
   hasPassword: boolean;
   lastSyncAt?: string;
   lastImapStatus: string;
@@ -254,6 +255,7 @@ export interface CaseDetail extends CaseSummary {
 }
 
 export interface DashboardData {
+  source?: 'mail-intake' | 'affiliation-cases';
   metrics: {
     total: number;
     inReview: number;
@@ -263,9 +265,18 @@ export interface DashboardData {
     reprocessRate: number;
     avgCycleHours: number;
     estimatedHoursSaved: number;
+    incomingTotal?: number;
+    generatedTotal?: number;
+    documentTotal?: number;
+    incomplete?: number;
+    analyzing?: number;
+    decisionPending?: number;
+    pendingGeneration?: number;
   };
   byStatus: Array<{ status: string; label: string; count: number }>;
   recentCases: CaseSummary[];
+  recentIncoming?: IncomingRequest[];
+  recentGeneratedCases?: GeneratedCaseSummary[];
   alerts: Array<{ level: string; message: string; count: number }>;
   volumeByDay?: Array<{ date: string; label?: string; count: number }>;
 }

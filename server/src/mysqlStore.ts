@@ -220,6 +220,7 @@ export class MysqlStore implements CaseStore {
         outgoing_secure BOOLEAN NOT NULL DEFAULT TRUE,
         encrypted_password TEXT NULL,
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        move_processed_to_trash BOOLEAN NOT NULL DEFAULT TRUE,
         last_sync_at DATETIME(3) NULL,
         last_imap_status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
         last_smtp_status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
@@ -243,6 +244,7 @@ export class MysqlStore implements CaseStore {
         has_attachments BOOLEAN NOT NULL DEFAULT FALSE,
         attachment_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,
         status VARCHAR(30) NOT NULL DEFAULT 'NEW',
+        source_moved_at DATETIME(3) NULL,
         created_at DATETIME(3) NOT NULL,
         updated_at DATETIME(3) NOT NULL,
         INDEX idx_incoming_received (received_at),
@@ -381,6 +383,7 @@ export class MysqlStore implements CaseStore {
           REFERENCES incoming_requests(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     `);
+    await this.ensureMailIntakeColumns();
     await this.pool.query(
       `INSERT INTO email_settings
         (id, email_address, username, incoming_host, incoming_port, incoming_secure,
@@ -391,6 +394,33 @@ export class MysqlStore implements CaseStore {
        ON DUPLICATE KEY UPDATE id=id`,
     );
     await this.pool.query('DELETE FROM user_sessions WHERE expires_at <= UTC_TIMESTAMP(3)');
+  }
+
+  private async ensureMailIntakeColumns(): Promise<void> {
+    const [emailColumns] = await this.pool.query<RowDataPacket[]>(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='email_settings'
+         AND COLUMN_NAME='move_processed_to_trash' LIMIT 1`,
+    );
+    if (!emailColumns[0]) {
+      await this.pool.query(
+        'ALTER TABLE email_settings ADD COLUMN move_processed_to_trash BOOLEAN NOT NULL DEFAULT TRUE AFTER enabled',
+      );
+    }
+
+    const [incomingColumns] = await this.pool.query<RowDataPacket[]>(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='incoming_requests'
+         AND COLUMN_NAME='source_moved_at' LIMIT 1`,
+    );
+    if (!incomingColumns[0]) {
+      await this.pool.query(
+        'ALTER TABLE incoming_requests ADD COLUMN source_moved_at DATETIME(3) NULL AFTER status',
+      );
+      await this.pool.query(
+        'UPDATE incoming_requests SET source_moved_at=UTC_TIMESTAMP(3) WHERE source_moved_at IS NULL',
+      );
+    }
   }
 
   private async loadOrMigrateCases(): Promise<void> {

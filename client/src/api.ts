@@ -93,7 +93,7 @@ export const api = {
     request<MailSettings>('/settings/email', { method: 'PUT', body: JSON.stringify(settings) }),
   testEmailSettings: () => request<{ imap: 'OK'; smtp: 'OK' }>('/settings/email/test', { method: 'POST' }),
   incomingRequests: () => request<{ items: IncomingRequest[] }>('/incoming-requests'),
-  syncIncomingRequests: () => request<{ imported: number; generated: number; documents: number; total: number }>('/incoming-requests/sync', { method: 'POST' }),
+  syncIncomingRequests: () => request<{ imported: number; generated: number; documents: number; movedToTrash: number; total: number }>('/incoming-requests/sync', { method: 'POST' }),
   deleteIncomingRequest: (id: string) =>
     request<{ ok: true; caseCode?: string; deletedObjects: number }>(`/incoming-requests/${id}`, { method: 'DELETE' }),
   generatedCases: () => request<{ items: GeneratedCaseSummary[] }>('/generated-cases'),

@@ -106,14 +106,14 @@ export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: ()
           <NavLink to="/" end><LayoutDashboard size={19} /><span>Resumen operativo</span></NavLink>
           <NavLink to="/solicitudes"><Inbox size={19} /><span>Solicitudes entrantes</span></NavLink>
           <NavLink to="/casos-generados"><FolderKanban size={19} /><span>Casos generados</span></NavLink>
-          <NavLink to="/casos" end><ClipboardList size={19} /><span>Bandeja de casos</span>{queueTotal !== null && <kbd>{queueTotal}</kbd>}</NavLink>
-          <NavLink to="/casos/nuevo"><FilePlus2 size={19} /><span>Nueva afiliación</span></NavLink>
 
           <span className="nav-group-label nav-group-label--spaced">Control</span>
           <NavLink to="/politicas"><ShieldCheck size={19} /><span>Políticas y reglas</span><em>Demo</em></NavLink>
 
           <span className="nav-group-label nav-group-label--spaced">Configuración</span>
           <NavLink to="/configuracion/correo"><Mail size={19} /><span>Correo IMAP / SMTP</span></NavLink>
+          <NavLink to="/casos" end><ClipboardList size={19} /><span>Bandeja de casos</span>{queueTotal !== null && <kbd>{queueTotal}</kbd>}</NavLink>
+          <NavLink to="/casos/nuevo"><FilePlus2 size={19} /><span>Nueva afiliación</span></NavLink>
           {user.role === 'ADMIN' && <NavLink to="/configuracion/usuarios"><Users size={19} /><span>Usuarios</span></NavLink>}
         </nav>
 

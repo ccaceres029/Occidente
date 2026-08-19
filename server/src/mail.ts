@@ -34,6 +34,7 @@ export interface MailSettings {
   outgoingPort: number;
   outgoingSecure: boolean;
   enabled: boolean;
+  moveProcessedToTrash: boolean;
   hasPassword: boolean;
   lastSyncAt?: string;
   lastImapStatus: string;
@@ -53,6 +54,7 @@ export interface MailSettingsInput {
   outgoingPort: number;
   outgoingSecure: boolean;
   enabled: boolean;
+  moveProcessedToTrash: boolean;
 }
 
 export interface IncomingRequest {
@@ -103,6 +105,35 @@ export interface GeneratedCaseDetail extends GeneratedCaseSummary {
   intelligenceStatus?: GeneratedIntelligenceStatus;
 }
 
+export interface MailOperationalDashboard {
+  source: 'mail-intake';
+  synthetic: false;
+  dataNotice: string;
+  metrics: {
+    total: number;
+    inReview: number;
+    returned: number;
+    compliance: number;
+    readyForCore: number;
+    reprocessRate: number;
+    avgCycleHours: number;
+    estimatedHoursSaved: number;
+    incomingTotal: number;
+    generatedTotal: number;
+    documentTotal: number;
+    incomplete: number;
+    analyzing: number;
+    decisionPending: number;
+    pendingGeneration: number;
+  };
+  byStatus: Array<{ status: string; label: string; count: number }>;
+  volumeByDay: Array<{ date: string; label: string; count: number }>;
+  recentCases: [];
+  recentIncoming: IncomingRequest[];
+  recentGeneratedCases: GeneratedCaseSummary[];
+  alerts: Array<{ level: string; message: string; count: number }>;
+}
+
 export interface GeneratedCaseWorkflow {
   stage: 'DOCUMENT_INCOMPLETE' | 'READY_FOR_ANALYSIS' | 'ANALYZING' | 'DECISION_PENDING' | 'ANALYSIS_ERROR';
   label: string;
@@ -135,6 +166,7 @@ interface SettingsRow extends RowDataPacket {
   outgoing_secure: number;
   encrypted_password: string | null;
   enabled: number;
+  move_processed_to_trash: number;
   last_sync_at: Date | null;
   last_imap_status: string;
   last_smtp_status: string;
@@ -263,6 +295,24 @@ interface StoredIntelligenceRow extends RowDataPacket {
   risk_route: RiskAssessment['route'] | null;
 }
 
+interface OperationalSummaryRow extends RowDataPacket {
+  incoming_total: number | string;
+  generated_total: number | string;
+  document_total: number | string;
+  pending_generation: number | string;
+  incomplete: number | string | null;
+  ready_for_analysis: number | string | null;
+  analyzing: number | string | null;
+  decision_pending: number | string | null;
+  analysis_error: number | string | null;
+  compliance: number | string | null;
+}
+
+interface OperationalVolumeRow extends RowDataPacket {
+  date: string | Date;
+  count: number | string;
+}
+
 function publicSettings(row: SettingsRow): MailSettings {
   return {
     emailAddress: row.email_address,
@@ -274,6 +324,7 @@ function publicSettings(row: SettingsRow): MailSettings {
     outgoingPort: Number(row.outgoing_port),
     outgoingSecure: Boolean(row.outgoing_secure),
     enabled: Boolean(row.enabled),
+    moveProcessedToTrash: Boolean(row.move_processed_to_trash),
     hasPassword: Boolean(row.encrypted_password),
     ...(row.last_sync_at ? { lastSyncAt: row.last_sync_at.toISOString() } : {}),
     lastImapStatus: row.last_imap_status,
@@ -349,6 +400,92 @@ function publicGeneratedCase(row: GeneratedCaseRow): GeneratedCaseSummary {
     };
   }
   return generatedCase;
+}
+
+function numberValue(value: number | string | null | undefined): number {
+  return Number(value || 0);
+}
+
+export function findTrashMailboxPath(
+  mailboxes: Array<{ path: string; specialUse?: string }>,
+): string | undefined {
+  return mailboxes.find((mailbox) => mailbox.specialUse === '\\Trash')?.path;
+}
+
+export function buildMailOperationalDashboard(
+  summary: OperationalSummaryRow,
+  volumeRows: OperationalVolumeRow[],
+  recentIncoming: IncomingRequest[],
+  recentGeneratedCases: GeneratedCaseSummary[],
+  now = new Date(),
+): MailOperationalDashboard {
+  const incomingTotal = numberValue(summary.incoming_total);
+  const generatedTotal = numberValue(summary.generated_total);
+  const documentTotal = numberValue(summary.document_total);
+  const pendingGeneration = numberValue(summary.pending_generation);
+  const incomplete = numberValue(summary.incomplete);
+  const readyForAnalysis = numberValue(summary.ready_for_analysis);
+  const analyzing = numberValue(summary.analyzing);
+  const decisionPending = numberValue(summary.decision_pending);
+  const analysisError = numberValue(summary.analysis_error);
+  const compliance = numberValue(summary.compliance);
+  const countsByDate = new Map(
+    volumeRows.map((row) => [
+      row.date instanceof Date ? row.date.toISOString().slice(0, 10) : String(row.date).slice(0, 10),
+      numberValue(row.count),
+    ]),
+  );
+  const daysToShow = 14;
+  const volumeByDay = Array.from({ length: daysToShow }, (_unused, index) => {
+    const day = new Date(now);
+    day.setUTCHours(12, 0, 0, 0);
+    day.setUTCDate(day.getUTCDate() - (daysToShow - 1 - index));
+    const date = day.toISOString().slice(0, 10);
+    return {
+      date,
+      label: day.toLocaleDateString('es-HN', { day: '2-digit', month: 'short', timeZone: 'UTC' }).replace('.', ''),
+      count: countsByDate.get(date) || 0,
+    };
+  });
+
+  return {
+    source: 'mail-intake',
+    synthetic: false,
+    dataNotice: 'Indicadores calculados desde solicitudes entrantes y casos generados.',
+    metrics: {
+      total: incomingTotal,
+      inReview: readyForAnalysis + analyzing,
+      returned: incomplete,
+      compliance,
+      readyForCore: decisionPending,
+      reprocessRate: generatedTotal ? Math.round((incomplete / generatedTotal) * 1_000) / 10 : 0,
+      avgCycleHours: 0,
+      estimatedHoursSaved: Math.round((documentTotal * 4.5 / 60) * 10) / 10,
+      incomingTotal,
+      generatedTotal,
+      documentTotal,
+      incomplete,
+      analyzing,
+      decisionPending,
+      pendingGeneration,
+    },
+    byStatus: [
+      { status: 'DOCUMENT_INCOMPLETE', label: 'Control documental', count: incomplete },
+      { status: 'READY_FOR_ANALYSIS', label: 'Listos para analizar', count: readyForAnalysis },
+      { status: 'ANALYZING', label: 'Análisis en curso', count: analyzing },
+      { status: 'DECISION_PENDING', label: 'Decisión pendiente', count: decisionPending },
+      { status: 'ANALYSIS_ERROR', label: 'Revisar análisis', count: analysisError },
+    ],
+    volumeByDay,
+    recentCases: [],
+    recentIncoming,
+    recentGeneratedCases,
+    alerts: [
+      { level: 'warning', message: 'Casos con documentación incompleta', count: incomplete },
+      { level: 'danger', message: 'Casos que requieren revisar el análisis', count: analysisError },
+      { level: 'info', message: 'Casos dirigidos a Cumplimiento', count: compliance },
+    ],
+  };
 }
 
 function publicGeneratedDocument(row: GeneratedDocumentRow): GeneratedCaseDocument {
@@ -434,13 +571,13 @@ export class MailService {
     await this.pool.query(
       `UPDATE email_settings SET
         email_address=?, username=?, incoming_host=?, incoming_port=?, incoming_secure=?,
-        outgoing_host=?, outgoing_port=?, outgoing_secure=?, enabled=?,
+        outgoing_host=?, outgoing_port=?, outgoing_secure=?, enabled=?, move_processed_to_trash=?,
         encrypted_password=COALESCE(?, encrypted_password), updated_by=?, updated_at=UTC_TIMESTAMP(3),
         last_imap_status='PENDING', last_smtp_status='PENDING', last_error=NULL
        WHERE id=1`,
       [input.emailAddress.trim(), input.username.trim(), input.incomingHost.trim(), input.incomingPort,
         input.incomingSecure, input.outgoingHost.trim(), input.outgoingPort, input.outgoingSecure,
-        input.enabled, encryptedPassword ?? null, actor],
+        input.enabled, input.moveProcessedToTrash !== false, encryptedPassword ?? null, actor],
     );
     return this.getSettings();
   }
@@ -511,6 +648,46 @@ export class MailService {
       void this.ensureGeneratedCaseIntelligence(row.id, false).catch(() => undefined);
     }
     return generatedCases;
+  }
+
+  async getOperationalDashboard(): Promise<MailOperationalDashboard> {
+    const [summaryResult, volumeResult, recentIncoming, recentGeneratedCases] = await Promise.all([
+      this.pool.query<OperationalSummaryRow[]>(
+        `SELECT
+          (SELECT COUNT(*) FROM incoming_requests) AS incoming_total,
+          (SELECT COUNT(*) FROM generated_cases) AS generated_total,
+          (SELECT COUNT(*) FROM generated_case_documents) AS document_total,
+          (SELECT COUNT(*) FROM incoming_requests WHERE status='NEW') AS pending_generation,
+          COALESCE(SUM(CASE WHEN analysis.status IS NULL OR analysis.status<>'COMPLETE' THEN 1 ELSE 0 END), 0) AS incomplete,
+          COALESCE(SUM(CASE WHEN analysis.status='COMPLETE' AND
+            (intelligence.status IS NULL OR intelligence.status NOT IN ('ANALYZING', 'COMPLETE', 'ERROR'))
+            THEN 1 ELSE 0 END), 0) AS ready_for_analysis,
+          COALESCE(SUM(CASE WHEN intelligence.status='ANALYZING' THEN 1 ELSE 0 END), 0) AS analyzing,
+          COALESCE(SUM(CASE WHEN intelligence.status='COMPLETE' THEN 1 ELSE 0 END), 0) AS decision_pending,
+          COALESCE(SUM(CASE WHEN intelligence.status='ERROR' THEN 1 ELSE 0 END), 0) AS analysis_error,
+          COALESCE(SUM(CASE WHEN intelligence.risk_route='CUMPLIMIENTO' THEN 1 ELSE 0 END), 0) AS compliance
+         FROM generated_cases gc
+         LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
+         LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id`,
+      ),
+      this.pool.query<OperationalVolumeRow[]>(
+        `SELECT DATE_FORMAT(received_at, '%Y-%m-%d') AS date, COUNT(*) AS count
+         FROM incoming_requests
+         WHERE received_at >= UTC_DATE() - INTERVAL 13 DAY
+         GROUP BY DATE(received_at)
+         ORDER BY DATE(received_at)`,
+      ),
+      this.listIncoming(5),
+      this.listGeneratedCases(5),
+    ]);
+    const [summaryRows] = summaryResult;
+    const [volumeRows] = volumeResult;
+    return buildMailOperationalDashboard(
+      summaryRows[0] || ({} as OperationalSummaryRow),
+      volumeRows,
+      recentIncoming,
+      recentGeneratedCases,
+    );
   }
 
   async getGeneratedCase(id: string): Promise<GeneratedCaseDetail | undefined> {
@@ -1005,19 +1182,22 @@ export class MailService {
     }
   }
 
-  async syncIncoming(limit = 50): Promise<{ imported: number; generated: number; documents: number; total: number }> {
-    if (this.syncing) return { imported: 0, generated: 0, documents: 0, total: (await this.listIncoming(250)).length };
+  async syncIncoming(limit = 50): Promise<{ imported: number; generated: number; documents: number; movedToTrash: number; total: number }> {
+    if (this.syncing) return { imported: 0, generated: 0, documents: 0, movedToTrash: 0, total: (await this.listIncoming(250)).length };
     this.syncing = true;
     let client: ImapFlow | undefined;
     try {
       const account = await this.privateSettings();
-      if (!account.enabled) return { imported: 0, generated: 0, documents: 0, total: (await this.listIncoming(250)).length };
+      if (!account.enabled) return { imported: 0, generated: 0, documents: 0, movedToTrash: 0, total: (await this.listIncoming(250)).length };
       let generated = await this.backfillStoredRequestsWithoutAttachments();
       client = this.imapClient(account);
       await client.connect();
+      const trashMailbox = account.moveProcessedToTrash ? await this.trashMailboxPath(client) : undefined;
       const lock = await client.getMailboxLock('INBOX');
       let imported = 0;
       let documents = 0;
+      let movedToTrash = 0;
+      const pendingMoves: Array<{ uid: number; incomingId: string }> = [];
       try {
         const count = client.mailbox && typeof client.mailbox !== 'boolean' ? client.mailbox.exists : 0;
         if (count > 0) {
@@ -1040,7 +1220,19 @@ export class MailService {
             imported += result.imported;
             generated += result.generated;
             documents += result.documents;
+            if (trashMailbox && result.shouldMove) {
+              pendingMoves.push({ uid: message.uid, incomingId: result.incomingId });
+            }
           }
+        }
+        for (const pending of pendingMoves) {
+          const moved = await client.messageMove([pending.uid], trashMailbox as string, { uid: true });
+          if (!moved) throw new Error('SiteGround no confirmó el movimiento del correo procesado a Papelera.');
+          await this.pool.query(
+            'UPDATE incoming_requests SET source_moved_at=UTC_TIMESTAMP(3), updated_at=UTC_TIMESTAMP(3) WHERE id=?',
+            [pending.incomingId],
+          );
+          movedToTrash += 1;
         }
       } finally {
         lock.release();
@@ -1049,7 +1241,7 @@ export class MailService {
         `UPDATE email_settings SET last_sync_at=UTC_TIMESTAMP(3), last_imap_status='OK',
          last_error=NULL WHERE id=1`,
       );
-      return { imported, generated, documents, total: (await this.listIncoming(250)).length };
+      return { imported, generated, documents, movedToTrash, total: (await this.listIncoming(250)).length };
     } catch (error) {
       const safeError = this.safeMailError(error);
       await this.pool.query(
@@ -1140,7 +1332,7 @@ export class MailService {
     receivedAt: Date;
     snippet?: string;
     parsed: ParsedMail;
-  }): Promise<{ imported: number; generated: number; documents: number }> {
+  }): Promise<{ imported: number; generated: number; documents: number; incomingId: string; shouldMove: boolean }> {
     if (input.parsed.attachments.length && !this.objectStorage) {
       throw new Error('El correo contiene adjuntos, pero el almacenamiento S3 no está configurado.');
     }
@@ -1148,13 +1340,19 @@ export class MailService {
     const uploadedKeys: string[] = [];
     try {
       await connection.beginTransaction();
-      const [incomingRows] = await connection.query<RowDataPacket[]>(
-        'SELECT id FROM incoming_requests WHERE message_id=? FOR UPDATE',
+      const [incomingRows] = await connection.query<(RowDataPacket & { id: string; source_moved_at: Date | null })[]>(
+        'SELECT id, source_moved_at FROM incoming_requests WHERE message_id=? FOR UPDATE',
         [input.messageId],
       );
       if (incomingRows[0]) {
         await connection.commit();
-        return { imported: 0, generated: 0, documents: 0 };
+        return {
+          imported: 0,
+          generated: 0,
+          documents: 0,
+          incomingId: incomingRows[0].id,
+          shouldMove: !incomingRows[0].source_moved_at,
+        };
       }
 
       const references = parsedMailReferences(input.parsed);
@@ -1222,7 +1420,7 @@ export class MailService {
         if (analysis?.missingCount) {
           await this.requestMissingDocuments(linkedCase.id, input.messageId).catch(() => undefined);
         }
-        return { imported: 1, generated: 0, documents: documentsAdded };
+        return { imported: 1, generated: 0, documents: documentsAdded, incomingId, shouldMove: true };
       }
 
       const date = caseDate(input.receivedAt);
@@ -1275,7 +1473,13 @@ export class MailService {
       if (analysis?.missingCount) {
         await this.requestMissingDocuments(generatedId, input.messageId).catch(() => undefined);
       }
-      return { imported: 1, generated: 1, documents: input.parsed.attachments.length };
+      return {
+        imported: 1,
+        generated: 1,
+        documents: input.parsed.attachments.length,
+        incomingId,
+        shouldMove: true,
+      };
     } catch (error) {
       await connection.rollback();
       if (uploadedKeys.length && this.objectStorage) {
@@ -1405,6 +1609,15 @@ export class MailService {
     });
   }
 
+  private async trashMailboxPath(client: ImapFlow): Promise<string> {
+    const mailboxes = await client.list();
+    const trashPath = findTrashMailboxPath(mailboxes);
+    if (!trashPath) {
+      throw new Error('SiteGround no expone una carpeta de Papelera identificable por IMAP.');
+    }
+    return trashPath;
+  }
+
   private smtpTransport(account: MailSettings & { password: string }) {
     return nodemailer.createTransport({
       host: account.outgoingHost,
@@ -1421,6 +1634,7 @@ export class MailService {
     const client = this.imapClient(account);
     try {
       await client.connect();
+      if (account.moveProcessedToTrash) await this.trashMailboxPath(client);
       const lock = await client.getMailboxLock('INBOX');
       lock.release();
     } finally {

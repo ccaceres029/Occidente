@@ -42,9 +42,10 @@ export default function IncomingRequestsPage({ currentUser }: { currentUser: Aut
     try {
       const result = await api.syncIncomingRequests();
       await load();
-      setToast({ message: result.generated
+      const movedNotice = result.movedToTrash ? ` ${result.movedToTrash} correo(s) movido(s) a Papelera en SiteGround.` : '';
+      setToast({ message: (result.generated
         ? `${result.generated} caso(s) generado(s) con ${result.documents} documento(s).`
-        : result.imported ? `${result.imported} solicitud(es) nueva(s) recibida(s).` : 'La bandeja está al día.' });
+        : result.imported ? `${result.imported} solicitud(es) nueva(s) recibida(s).` : 'La bandeja está al día.') + movedNotice });
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : 'No fue posible sincronizar el correo.');
     } finally {

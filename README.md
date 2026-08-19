@@ -61,3 +61,5 @@ pnpm build
 - La cuenta de correo se conecta por IMAP TLS para entrada y SMTP TLS para salida; su contraseña se almacena cifrada.
 - Los documentos de solicitudes y respuestas permanecen en S3 privado bajo la carpeta del caso; MySQL conserva su metadata y trazabilidad.
 - Los correos automáticos se registran por caso y mensaje de origen para impedir envíos duplicados durante la sincronización IMAP.
+- El resumen operativo usa solicitudes entrantes, casos generados, documentos y etapas de análisis almacenados en MySQL.
+- Cuando la opción está activa, un correo se mueve de INBOX a la Papelera IMAP únicamente después de persistir su solicitud, caso y documentos; no se elimina de forma permanente.

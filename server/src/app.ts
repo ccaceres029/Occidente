@@ -410,6 +410,7 @@ function dashboard(store: CaseStore) {
     Math.max(0, documentCount * 3.5 + extractedFieldCount * 0.5 + auditEvents.filter((event) => event.action === 'application-prefill').length * 18);
 
   return {
+    source: 'affiliation-cases' as const,
     synthetic: true,
     dataNotice: 'Indicadores calculados desde los expedientes cargados en el portal local.',
     metrics: {
@@ -786,7 +787,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
   });
 
-  app.get('/api/dashboard', async () => dashboard(store));
+  app.get('/api/dashboard', async () => mailService ? mailService.getOperationalDashboard() : dashboard(store));
 
   app.get('/api/policies', async () => getPolicyCatalog());
 

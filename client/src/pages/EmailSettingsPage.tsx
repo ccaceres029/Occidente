@@ -18,6 +18,7 @@ function editable(settings: MailSettings): EditableSettings {
     outgoingPort: settings.outgoingPort,
     outgoingSecure: settings.outgoingSecure,
     enabled: settings.enabled,
+    moveProcessedToTrash: settings.moveProcessedToTrash,
   };
 }
 
@@ -131,6 +132,7 @@ export default function EmailSettingsPage() {
             <label><span>Servidor entrante</span><input required value={form.incomingHost} onChange={(event) => update('incomingHost', event.target.value)} /></label>
             <label><span>Puerto IMAP</span><input type="number" min="1" max="65535" required value={form.incomingPort} onChange={(event) => update('incomingPort', Number(event.target.value))} /></label>
             <label className="settings-toggle"><input type="checkbox" checked={form.incomingSecure} onChange={(event) => update('incomingSecure', event.target.checked)} /><span><strong>TLS directo</strong><small>Conexión cifrada desde el inicio</small></span></label>
+            <label className="settings-toggle"><input type="checkbox" checked={form.moveProcessedToTrash} onChange={(event) => update('moveProcessedToTrash', event.target.checked)} /><span><strong>Mover procesados a Papelera</strong><small>Solo después de guardar la solicitud y sus documentos</small></span></label>
           </div>
         </section>
 

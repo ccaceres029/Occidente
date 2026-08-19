@@ -540,6 +540,17 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .recent-panel { margin-bottom: 17px; }
 .recent-list { padding: 0 18px 17px; }
+.dashboard-activity-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
+.dashboard-mail-list { padding: 0 18px 16px; }
+.dashboard-mail-list > a { display: grid; grid-template-columns: 34px minmax(0, 1fr) 16px; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line-soft); color: #78857e; }
+.dashboard-mail-list > a:hover strong { color: var(--green-700); }
+.dashboard-mail-list__icon { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 9px; color: var(--orange-700); background: var(--orange-50); }
+.dashboard-mail-list__icon--case { color: var(--green-700); background: var(--green-50); }
+.dashboard-mail-list > a > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.dashboard-mail-list strong, .dashboard-mail-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-mail-list strong { color: #34453c; font-size: 10px; }
+.dashboard-mail-list small { color: #8b9690; font-size: 8px; }
+.dashboard-activity-empty { padding: 18px 0; color: var(--muted); font-size: 10px; text-align: center; }
 .ai-safety-note { display: flex; align-items: center; gap: 13px; padding: 15px 18px; border: 1px solid #dcd2ec; border-radius: var(--radius); color: #65517f; background: linear-gradient(100deg, #faf7ff, #fff); }
 .ai-safety-note__icon { display: grid; width: 40px; height: 40px; flex: 0 0 auto; place-items: center; border-radius: 12px; color: var(--purple); background: #eee6fb; }
 .ai-safety-note > div:nth-child(2) { flex: 1; }
@@ -1582,6 +1593,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .page-content { padding-inline: 24px; }
   .global-search { display: none; }
   .dashboard-grid { grid-template-columns: 1fr; }
+  .dashboard-activity-grid { grid-template-columns: 1fr; gap: 0; }
   .detail-layout { grid-template-columns: 1fr; }
   .detail-aside { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .decision-card { grid-column: 1 / -1; }
