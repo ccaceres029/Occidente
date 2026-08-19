@@ -13,6 +13,8 @@ Demostración local y sintética para recorrer una afiliación individual desde 
 - Vista previa de los datos preparados para el sistema central.
 - Contrato PDF generado desde los datos canónicos.
 - Resumen asistido por Gemini cuando la llave local está disponible.
+- Solicitud automática por SMTP cuando la matriz documental detecta faltantes.
+- Vinculación de respuestas por código AFPC y encabezados del hilo para incorporar adjuntos y reanalizar el caso.
 
 > La demostración no contiene ni debe recibir información real de clientes. Los casos incluidos son ficticios.
 
@@ -57,4 +59,5 @@ pnpm build
 - Las decisiones quedan registradas en una bitácora local.
 - En producción, la autenticación, las sesiones, los expedientes, la auditoría y la bandeja de solicitudes usan MySQL `dbOccidente`.
 - La cuenta de correo se conecta por IMAP TLS para entrada y SMTP TLS para salida; su contraseña se almacena cifrada.
-- Los documentos cargados permanecen en el volumen persistente del servidor y MySQL conserva su metadata y referencia.
+- Los documentos de solicitudes y respuestas permanecen en S3 privado bajo la carpeta del caso; MySQL conserva su metadata y trazabilidad.
+- Los correos automáticos se registran por caso y mensaje de origen para impedir envíos duplicados durante la sincronización IMAP.

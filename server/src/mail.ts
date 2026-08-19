@@ -3,6 +3,11 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser, type Attachment, type ParsedMail } from 'mailparser';
 import nodemailer from 'nodemailer';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import {
+  buildMissingDocumentsMessage,
+  extractCaseCode,
+  parsedMailReferences,
+} from './caseMailThread.js';
 import type { GeminiConfig } from './config.js';
 import {
   analyzeDocumentCompleteness,
@@ -84,6 +89,15 @@ export interface GeneratedCaseSummary {
 export interface GeneratedCaseDetail extends GeneratedCaseSummary {
   incomingRequestId: string;
   documents: GeneratedCaseDocument[];
+  missingDocumentRequest?: MissingDocumentRequestStatus;
+}
+
+export interface MissingDocumentRequestStatus {
+  status: 'PENDING' | 'SENT' | 'ERROR';
+  subject: string;
+  recipientEmail?: string;
+  sentAt?: string;
+  error?: string;
 }
 
 interface SettingsRow extends RowDataPacket {
@@ -180,6 +194,27 @@ interface StoredAnalysisRow extends RowDataPacket {
   model: string | null;
   analysis_version: string;
   analyzed_at: Date;
+}
+
+interface LinkedCaseRow extends RowDataPacket {
+  id: string;
+  code: string;
+  sender_name: string | null;
+  sender_email: string | null;
+}
+
+interface NotificationCaseRow extends LinkedCaseRow {
+  trigger_message_id: string;
+}
+
+interface MailEventRow extends RowDataPacket {
+  id: string;
+  case_id: string;
+  status: MissingDocumentRequestStatus['status'];
+  subject: string;
+  counterparty_email: string | null;
+  sent_at: Date | null;
+  error_message: string | null;
 }
 
 function publicSettings(row: SettingsRow): MailSettings {
@@ -357,9 +392,13 @@ export class MailService {
       `SELECT incoming.id, incoming.message_id, incoming.mailbox_uid, incoming.subject,
         incoming.sender_name, incoming.sender_email, incoming.received_at, incoming.snippet,
         incoming.has_attachments, incoming.attachment_count, incoming.status,
-        gc.id AS case_id, gc.code AS case_code
+        COALESCE(gc.id, linked_case.id) AS case_id,
+        COALESCE(gc.code, linked_case.code) AS case_code
        FROM incoming_requests incoming
        LEFT JOIN generated_cases gc ON gc.incoming_request_id=incoming.id
+       LEFT JOIN generated_case_mail_events linked_event
+         ON linked_event.incoming_request_id=incoming.id AND linked_event.direction='INBOUND'
+       LEFT JOIN generated_cases linked_case ON linked_case.id=linked_event.case_id
        ORDER BY incoming.received_at DESC LIMIT ?`,
       [safeLimit],
     );
@@ -429,10 +468,19 @@ export class MailService {
         policyRef: item.policy_ref,
       }));
     }
+    const [mailRows] = await this.pool.query<MailEventRow[]>(
+      `SELECT id, case_id, status, subject, counterparty_email, sent_at, error_message
+       FROM generated_case_mail_events
+       WHERE case_id=? AND event_type='MISSING_DOCUMENT_REQUEST'
+       ORDER BY created_at DESC LIMIT 1`,
+      [id],
+    );
+    const latestRequest = mailRows[0];
     return {
       ...generatedCase,
       incomingRequestId: row.incoming_request_id,
       documents: documentRows.map(publicGeneratedDocument),
+      ...(latestRequest ? { missingDocumentRequest: this.publicMissingDocumentRequest(latestRequest) } : {}),
     };
   }
 
@@ -499,6 +547,136 @@ export class MailService {
     }
   }
 
+  async notifyPendingMissingDocumentRequests(limit = 25): Promise<number> {
+    const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+    const [rows] = await this.pool.query<NotificationCaseRow[]>(
+      `SELECT gc.id, gc.code, gc.sender_name, gc.sender_email,
+        incoming.message_id AS trigger_message_id
+       FROM generated_cases gc
+       JOIN incoming_requests incoming ON incoming.id=gc.incoming_request_id
+       JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
+       WHERE analysis.missing_count > 0
+         AND gc.sender_email IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM generated_case_mail_events event
+           WHERE event.case_id=gc.id
+             AND event.event_type='MISSING_DOCUMENT_REQUEST'
+             AND event.status='SENT'
+         )
+       ORDER BY gc.created_at LIMIT ?`,
+      [safeLimit],
+    );
+    let sent = 0;
+    for (const row of rows) {
+      const result = await this.requestMissingDocuments(row.id, row.trigger_message_id).catch(() => undefined);
+      if (result?.status === 'SENT') sent += 1;
+    }
+    return sent;
+  }
+
+  async requestMissingDocuments(
+    caseId: string,
+    triggerMessageId: string,
+  ): Promise<MissingDocumentRequestStatus | undefined> {
+    const analysis = await this.storedDocumentAnalysis(caseId);
+    const missing = analysis?.items
+      .filter((item) => item.status === 'MISSING')
+      .map((item) => ({ requirementType: item.requirementType, label: item.label })) || [];
+    if (!missing.length) return undefined;
+
+    const [caseRows] = await this.pool.query<LinkedCaseRow[]>(
+      `SELECT id, code, sender_name, sender_email FROM generated_cases WHERE id=? LIMIT 1`,
+      [caseId],
+    );
+    const generatedCase = caseRows[0];
+    if (!generatedCase?.sender_email) return undefined;
+    const account = await this.privateSettings();
+    if (generatedCase.sender_email.toLocaleLowerCase('en-US') === account.emailAddress.toLocaleLowerCase('en-US')) {
+      return undefined;
+    }
+
+    const [existingRows] = await this.pool.query<MailEventRow[]>(
+      `SELECT id, case_id, status, subject, counterparty_email, sent_at, error_message
+       FROM generated_case_mail_events
+       WHERE case_id=? AND trigger_message_id=? AND event_type='MISSING_DOCUMENT_REQUEST'
+       LIMIT 1`,
+      [caseId, triggerMessageId],
+    );
+    const existing = existingRows[0];
+    if (existing?.status === 'SENT') return this.publicMissingDocumentRequest(existing);
+
+    const message = buildMissingDocumentsMessage(generatedCase.code, generatedCase.sender_name || undefined, missing);
+    const eventId = existing?.id || randomUUID();
+    if (existing) {
+      await this.pool.query(
+        `UPDATE generated_case_mail_events SET status='PENDING', subject=?, counterparty_email=?,
+          missing_document_types=?, error_message=NULL, updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
+        [message.subject, generatedCase.sender_email, JSON.stringify(missing.map((item) => item.requirementType)), eventId],
+      );
+    } else {
+      await this.pool.query(
+        `INSERT INTO generated_case_mail_events
+          (id, case_id, direction, event_type, trigger_message_id, in_reply_to, subject,
+           counterparty_email, missing_document_types, status, created_at, updated_at)
+         VALUES (?, ?, 'OUTBOUND', 'MISSING_DOCUMENT_REQUEST', ?, ?, ?, ?, ?,
+           'PENDING', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+        [eventId, caseId, triggerMessageId, triggerMessageId, message.subject,
+          generatedCase.sender_email, JSON.stringify(missing.map((item) => item.requirementType))],
+      );
+    }
+
+    const transport = this.smtpTransport(account);
+    try {
+      const sent = await transport.sendMail({
+        from: { name: 'AFPC Occidente', address: account.emailAddress },
+        to: generatedCase.sender_email,
+        replyTo: account.emailAddress,
+        subject: message.subject,
+        text: message.text,
+        html: message.html,
+        inReplyTo: triggerMessageId,
+        references: triggerMessageId,
+        headers: {
+          'Auto-Submitted': 'auto-generated',
+          'X-AFPC-Case-Code': generatedCase.code,
+        },
+      });
+      await this.pool.query(
+        `UPDATE generated_case_mail_events SET status='SENT', message_id=?, sent_at=UTC_TIMESTAMP(3),
+          error_message=NULL, updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
+        [sent.messageId.slice(0, 255), eventId],
+      );
+      await this.pool.query(
+        `UPDATE email_settings SET last_smtp_status='OK', last_error=NULL WHERE id=1`,
+      );
+      return {
+        status: 'SENT',
+        subject: message.subject,
+        recipientEmail: generatedCase.sender_email,
+        sentAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const safeError = this.safeMailError(error);
+      await this.pool.query(
+        `UPDATE generated_case_mail_events SET status='ERROR', error_message=?,
+          updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
+        [safeError, eventId],
+      );
+      await this.pool.query(
+        `UPDATE email_settings SET last_smtp_status='ERROR', last_error=? WHERE id=1`,
+        [safeError],
+      );
+      return {
+        status: 'ERROR',
+        subject: message.subject,
+        recipientEmail: generatedCase.sender_email,
+        error: safeError,
+      };
+    } finally {
+      transport.close();
+    }
+  }
+
   async getGeneratedDocument(caseId: string, documentId: string): Promise<{ document: GeneratedCaseDocument; content: Buffer } | undefined> {
     if (!this.objectStorage) throw new Error('El almacenamiento S3 no está configurado.');
     const [rows] = await this.pool.query<GeneratedDocumentRow[]>(
@@ -530,6 +708,18 @@ export class MailService {
         return undefined;
       }
       const deletedObjects = await this.objectStorage.deleteCase(row.code);
+      const [linkedRows] = await connection.query<(RowDataPacket & { incoming_request_id: string })[]>(
+        `SELECT incoming_request_id FROM generated_case_mail_events
+         WHERE case_id=? AND incoming_request_id IS NOT NULL AND incoming_request_id<>?`,
+        [row.id, row.incoming_request_id],
+      );
+      if (linkedRows.length) {
+        const placeholders = linkedRows.map(() => '?').join(', ');
+        await connection.query(
+          `DELETE FROM incoming_requests WHERE id IN (${placeholders})`,
+          linkedRows.map((item) => item.incoming_request_id),
+        );
+      }
       await connection.query('DELETE FROM incoming_requests WHERE id=?', [row.incoming_request_id]);
       await connection.commit();
       return { code: row.code, deletedObjects };
@@ -545,10 +735,21 @@ export class MailService {
     const connection = await this.pool.getConnection();
     try {
       await connection.beginTransaction();
-      const [rows] = await connection.query<(RowDataPacket & { id: string; case_code: string | null })[]>(
-        `SELECT incoming.id, gc.code AS case_code
+      const [rows] = await connection.query<(RowDataPacket & {
+        id: string;
+        case_id: string | null;
+        case_code: string | null;
+        root_incoming_request_id: string | null;
+      })[]>(
+        `SELECT incoming.id,
+          COALESCE(gc.id, linked_case.id) AS case_id,
+          COALESCE(gc.code, linked_case.code) AS case_code,
+          COALESCE(gc.incoming_request_id, linked_case.incoming_request_id) AS root_incoming_request_id
          FROM incoming_requests incoming
          LEFT JOIN generated_cases gc ON gc.incoming_request_id=incoming.id
+         LEFT JOIN generated_case_mail_events linked_event
+           ON linked_event.incoming_request_id=incoming.id AND linked_event.direction='INBOUND'
+         LEFT JOIN generated_cases linked_case ON linked_case.id=linked_event.case_id
          WHERE incoming.id=? LIMIT 1 FOR UPDATE`,
         [id],
       );
@@ -561,8 +762,20 @@ export class MailService {
       if (row.case_code) {
         if (!this.objectStorage) throw new Error('El almacenamiento S3 no está configurado.');
         deletedObjects = await this.objectStorage.deleteCase(row.case_code);
+        const [linkedRows] = await connection.query<(RowDataPacket & { incoming_request_id: string })[]>(
+          `SELECT incoming_request_id FROM generated_case_mail_events
+           WHERE case_id=? AND incoming_request_id IS NOT NULL AND incoming_request_id<>?`,
+          [row.case_id, row.root_incoming_request_id],
+        );
+        if (linkedRows.length) {
+          const placeholders = linkedRows.map(() => '?').join(', ');
+          await connection.query(
+            `DELETE FROM incoming_requests WHERE id IN (${placeholders})`,
+            linkedRows.map((item) => item.incoming_request_id),
+          );
+        }
       }
-      await connection.query('DELETE FROM incoming_requests WHERE id=?', [row.id]);
+      await connection.query('DELETE FROM incoming_requests WHERE id=?', [row.root_incoming_request_id || row.id]);
       await connection.commit();
       return {
         ...(row.case_code ? { caseCode: row.case_code } : {}),
@@ -637,12 +850,14 @@ export class MailService {
   private async backfillStoredRequestsWithoutAttachments(): Promise<number> {
     const [rows] = await this.pool.query<(RowDataPacket & {
       id: string;
+      message_id: string;
       subject: string;
       sender_name: string | null;
       sender_email: string | null;
       received_at: Date;
     })[]>(
-      `SELECT incoming.id, incoming.subject, incoming.sender_name, incoming.sender_email, incoming.received_at
+      `SELECT incoming.id, incoming.message_id, incoming.subject, incoming.sender_name,
+        incoming.sender_email, incoming.received_at
        FROM incoming_requests incoming
        LEFT JOIN generated_cases gc ON gc.incoming_request_id=incoming.id
        WHERE gc.id IS NULL AND incoming.attachment_count=0
@@ -676,8 +891,19 @@ export class MailService {
           `UPDATE incoming_requests SET status='CASE_CREATED', updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
           [row.id],
         );
+        await connection.query(
+          `INSERT INTO generated_case_mail_events
+            (id, case_id, incoming_request_id, direction, event_type, message_id,
+             subject, counterparty_email, status, created_at, updated_at)
+           VALUES (?, ?, ?, 'INBOUND', 'ORIGINAL_RECEIVED', ?, ?, ?, 'RECEIVED',
+             UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+          [randomUUID(), generatedId, row.id, row.message_id, row.subject, row.sender_email],
+        );
         await connection.commit();
-        await this.analyzeGeneratedCase(generatedId, true).catch(() => undefined);
+        const analysis = await this.analyzeGeneratedCase(generatedId, true).catch(() => undefined);
+        if (analysis?.missingCount) {
+          await this.requestMissingDocuments(generatedId, row.message_id).catch(() => undefined);
+        }
         generated += 1;
       } catch (error) {
         await connection.rollback();
@@ -703,41 +929,89 @@ export class MailService {
       throw new Error('El correo contiene adjuntos, pero el almacenamiento S3 no está configurado.');
     }
     const connection = await this.pool.getConnection();
-    let caseCode: string | undefined;
+    const uploadedKeys: string[] = [];
     try {
       await connection.beginTransaction();
       const [incomingRows] = await connection.query<RowDataPacket[]>(
         'SELECT id FROM incoming_requests WHERE message_id=? FOR UPDATE',
         [input.messageId],
       );
-      let incomingId = typeof incomingRows[0]?.id === 'string' ? incomingRows[0].id : '';
-      let imported = 0;
-      if (!incomingId) {
-        incomingId = randomUUID();
-        await connection.query(
-          `INSERT INTO incoming_requests
-            (id, message_id, mailbox_uid, subject, sender_name, sender_email, received_at,
-             snippet, has_attachments, attachment_count, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
-          [incomingId, input.messageId, input.mailboxUid, input.subject, input.senderName || null,
-            input.senderEmail || null, input.receivedAt, input.snippet || null,
-            input.parsed.attachments.length > 0, input.parsed.attachments.length],
-        );
-        imported = 1;
+      if (incomingRows[0]) {
+        await connection.commit();
+        return { imported: 0, generated: 0, documents: 0 };
       }
 
-      const [existingCases] = await connection.query<RowDataPacket[]>(
-        'SELECT id FROM generated_cases WHERE incoming_request_id=? FOR UPDATE',
-        [incomingId],
+      const references = parsedMailReferences(input.parsed);
+      const linkedCase = await this.findLinkedCase(connection, input.subject, input.senderEmail, references);
+      const incomingId = randomUUID();
+      await connection.query(
+        `INSERT INTO incoming_requests
+          (id, message_id, mailbox_uid, subject, sender_name, sender_email, received_at,
+           snippet, has_attachments, attachment_count, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+        [incomingId, input.messageId, input.mailboxUid, input.subject, input.senderName || null,
+          input.senderEmail || null, input.receivedAt, input.snippet || null,
+          input.parsed.attachments.length > 0, input.parsed.attachments.length,
+          linkedCase ? 'CASE_FOLLOWUP' : 'NEW'],
       );
-      if (existingCases[0]) {
+
+      if (linkedCase) {
+        let documentsAdded = 0;
+        for (const [index, attachment] of input.parsed.attachments.entries()) {
+          const checksum = createHash('sha256').update(attachment.content).digest('hex');
+          const [duplicates] = await connection.query<RowDataPacket[]>(
+            `SELECT id FROM generated_case_documents
+             WHERE case_id=? AND checksum_sha256=? LIMIT 1`,
+            [linkedCase.id, checksum],
+          );
+          if (duplicates[0]) continue;
+          const filename = `respuesta-${input.mailboxUid}-${safeAttachmentName(attachment, index)}`;
+          const stored = await this.objectStorage?.putCaseDocument(
+            linkedCase.code,
+            filename,
+            attachment.contentType,
+            attachment.content,
+          );
+          if (!stored) throw new Error('No fue posible guardar el documento de respuesta en S3.');
+          uploadedKeys.push(stored.key);
+          await connection.query(
+            `INSERT INTO generated_case_documents
+              (id, case_id, filename, content_type, size_bytes, checksum_sha256,
+               s3_bucket, s3_key, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))`,
+            [randomUUID(), linkedCase.id, attachment.filename?.slice(0, 512) || filename,
+              attachment.contentType || 'application/octet-stream', attachment.size,
+              checksum, stored.bucket, stored.key],
+          );
+          documentsAdded += 1;
+        }
+        await connection.query(
+          `INSERT INTO generated_case_mail_events
+            (id, case_id, incoming_request_id, direction, event_type, message_id,
+             subject, counterparty_email, status, created_at, updated_at)
+           VALUES (?, ?, ?, 'INBOUND', 'FOLLOWUP_RECEIVED', ?, ?, ?, 'RECEIVED',
+             UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+          [randomUUID(), linkedCase.id, incomingId, input.messageId, input.subject, input.senderEmail || null],
+        );
+        await connection.query(
+          `UPDATE incoming_requests SET status='CASE_LINKED', updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
+          [incomingId],
+        );
+        await connection.query(
+          `UPDATE generated_cases SET status='DOCUMENTS_UPDATED', updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
+          [linkedCase.id],
+        );
         await connection.commit();
-        return { imported, generated: 0, documents: 0 };
+        const analysis = await this.analyzeGeneratedCase(linkedCase.id, true).catch(() => undefined);
+        if (analysis?.missingCount) {
+          await this.requestMissingDocuments(linkedCase.id, input.messageId).catch(() => undefined);
+        }
+        return { imported: 1, generated: 0, documents: documentsAdded };
       }
 
       const date = caseDate(input.receivedAt);
       const sequence = await this.nextDailySequence(connection, date);
-      caseCode = `AFPC-${date.replaceAll('-', '')}-${String(sequence).padStart(5, '0')}`;
+      const caseCode = `AFPC-${date.replaceAll('-', '')}-${String(sequence).padStart(5, '0')}`;
       const generatedId = randomUUID();
       await connection.query(
         `INSERT INTO generated_cases
@@ -757,6 +1031,7 @@ export class MailService {
           attachment.content,
         );
         if (!stored) throw new Error('No fue posible guardar el documento en S3.');
+        uploadedKeys.push(stored.key);
         await connection.query(
           `INSERT INTO generated_case_documents
             (id, case_id, filename, content_type, size_bytes, checksum_sha256,
@@ -771,12 +1046,25 @@ export class MailService {
         `UPDATE incoming_requests SET status='CASE_CREATED', updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
         [incomingId],
       );
+      await connection.query(
+        `INSERT INTO generated_case_mail_events
+          (id, case_id, incoming_request_id, direction, event_type, message_id,
+           subject, counterparty_email, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'INBOUND', 'ORIGINAL_RECEIVED', ?, ?, ?, 'RECEIVED',
+           UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+        [randomUUID(), generatedId, incomingId, input.messageId, input.subject, input.senderEmail || null],
+      );
       await connection.commit();
-      await this.analyzeGeneratedCase(generatedId, true).catch(() => undefined);
-      return { imported, generated: 1, documents: input.parsed.attachments.length };
+      const analysis = await this.analyzeGeneratedCase(generatedId, true).catch(() => undefined);
+      if (analysis?.missingCount) {
+        await this.requestMissingDocuments(generatedId, input.messageId).catch(() => undefined);
+      }
+      return { imported: 1, generated: 1, documents: input.parsed.attachments.length };
     } catch (error) {
       await connection.rollback();
-      if (caseCode && this.objectStorage) await this.objectStorage.deleteCase(caseCode).catch(() => undefined);
+      if (uploadedKeys.length && this.objectStorage) {
+        await this.objectStorage.deleteObjects(uploadedKeys).catch(() => undefined);
+      }
       throw error;
     } finally {
       connection.release();
@@ -801,6 +1089,36 @@ export class MailService {
       );
     }
     return next;
+  }
+
+  private async findLinkedCase(
+    connection: PoolConnection,
+    subject: string,
+    senderEmail: string | undefined,
+    references: string[],
+  ): Promise<LinkedCaseRow | undefined> {
+    if (!senderEmail) return undefined;
+    const code = extractCaseCode(subject);
+    if (code) {
+      const [rows] = await connection.query<LinkedCaseRow[]>(
+        `SELECT id, code, sender_name, sender_email
+         FROM generated_cases WHERE code=? AND sender_email=? LIMIT 1 FOR UPDATE`,
+        [code, senderEmail],
+      );
+      if (rows[0]) return rows[0];
+    }
+    if (!references.length) return undefined;
+    const placeholders = references.map(() => '?').join(', ');
+    const [rows] = await connection.query<LinkedCaseRow[]>(
+      `SELECT gc.id, gc.code, gc.sender_name, gc.sender_email
+       FROM generated_case_mail_events event
+       JOIN generated_cases gc ON gc.id=event.case_id
+       WHERE event.direction='OUTBOUND' AND event.message_id IN (${placeholders})
+         AND gc.sender_email=?
+       ORDER BY event.created_at DESC LIMIT 1 FOR UPDATE`,
+      [...references, senderEmail],
+    );
+    return rows[0];
   }
 
   private async storedDocumentAnalysis(id: string): Promise<DocumentCompletenessAnalysis | undefined> {
@@ -871,6 +1189,18 @@ export class MailService {
     });
   }
 
+  private smtpTransport(account: MailSettings & { password: string }) {
+    return nodemailer.createTransport({
+      host: account.outgoingHost,
+      port: account.outgoingPort,
+      secure: account.outgoingSecure,
+      auth: { user: account.username, pass: account.password },
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 30_000,
+    });
+  }
+
   private async verifyImap(account: MailSettings & { password: string }): Promise<void> {
     const client = this.imapClient(account);
     try {
@@ -883,20 +1213,22 @@ export class MailService {
   }
 
   private async verifySmtp(account: MailSettings & { password: string }): Promise<void> {
-    const transport = nodemailer.createTransport({
-      host: account.outgoingHost,
-      port: account.outgoingPort,
-      secure: account.outgoingSecure,
-      auth: { user: account.username, pass: account.password },
-      connectionTimeout: 15_000,
-      greetingTimeout: 15_000,
-      socketTimeout: 30_000,
-    });
+    const transport = this.smtpTransport(account);
     try {
       await transport.verify();
     } finally {
       transport.close();
     }
+  }
+
+  private publicMissingDocumentRequest(row: MailEventRow): MissingDocumentRequestStatus {
+    return {
+      status: row.status,
+      subject: row.subject,
+      ...(row.counterparty_email ? { recipientEmail: row.counterparty_email } : {}),
+      ...(row.sent_at ? { sentAt: row.sent_at.toISOString() } : {}),
+      ...(row.error_message ? { error: row.error_message } : {}),
+    };
   }
 
   private safeMailError(error: unknown): string {

@@ -1277,7 +1277,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       void mailService.syncIncoming().catch((error) => app.log.warn({ error }, 'No se pudo sincronizar el buzón IMAP'));
     }, mailRuntime.syncIntervalSeconds * 1000);
     mailTimer.unref();
-    void mailService.syncIncoming().catch((error) => app.log.warn({ error }, 'Sincronización IMAP inicial pendiente'));
+    void mailService.syncIncoming()
+      .then(() => mailService.notifyPendingMissingDocumentRequests())
+      .catch((error) => app.log.warn({ error }, 'Sincronización IMAP inicial pendiente'));
   }
 
   app.addHook('onClose', async () => {

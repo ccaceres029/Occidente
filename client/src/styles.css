@@ -706,6 +706,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .document-completeness__action { display: flex; align-items: stretch; justify-content: center; flex-direction: column; gap: 7px; padding: 12px 14px; border-left: 1px solid var(--line-soft); }
 .document-completeness__action .button { width: 100%; }
 .document-completeness__action small { color: #829087; font-size: 7px; line-height: 1.35; text-align: center; }
+.document-completeness__mail-status { display: flex; align-items: center; justify-content: center; gap: 5px; color: #08733a; font-size: 7px; line-height: 1.35; text-align: center; }
+.document-completeness__mail-status.is-error { color: var(--danger); }
 .generated-document-workspace { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: calc(100vh - 500px); min-height: 650px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: white; box-shadow: var(--shadow-sm); }
 .generated-document-list { overflow-y: auto; border-right: 1px solid var(--line-soft); background: #f9fbfa; }
 .generated-document-list > header { display: flex; align-items: center; gap: 9px; min-height: 58px; padding: 12px 14px; color: var(--green-700); background: white; }

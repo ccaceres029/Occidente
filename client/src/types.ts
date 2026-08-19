@@ -114,6 +114,13 @@ export interface GeneratedCaseSummary {
 export interface GeneratedCaseDetail extends GeneratedCaseSummary {
   incomingRequestId: string;
   documents: GeneratedCaseDocument[];
+  missingDocumentRequest?: {
+    status: 'PENDING' | 'SENT' | 'ERROR';
+    subject: string;
+    recipientEmail?: string;
+    sentAt?: string;
+    error?: string;
+  };
 }
 
 export interface ClientData {

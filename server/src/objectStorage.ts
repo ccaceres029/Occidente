@@ -63,6 +63,20 @@ export class ObjectStorage {
     return deleted;
   }
 
+  async deleteObjects(keys: string[]): Promise<number> {
+    const uniqueKeys = [...new Set(keys)];
+    if (!uniqueKeys.length) return 0;
+    uniqueKeys.forEach((key) => this.assertManagedKey(key));
+    const response = await this.client.send(new DeleteObjectsCommand({
+      Bucket: this.bucket,
+      Delete: { Objects: uniqueKeys.map((Key) => ({ Key })), Quiet: true },
+    }));
+    if (response.Errors?.length) {
+      throw new Error(`S3 no pudo eliminar ${response.Errors.length} objeto(s) compensatorios.`);
+    }
+    return uniqueKeys.length;
+  }
+
   private casePrefix(caseCode: string): string {
     if (!/^AFPC-\d{8}-\d{5,}$/u.test(caseCode)) throw new Error('El código de caso no es válido para S3.');
     return `${this.prefix}/${caseCode}/`;

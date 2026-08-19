@@ -330,6 +330,34 @@ export class MysqlStore implements CaseStore {
           REFERENCES generated_case_documents(id) ON DELETE SET NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS generated_case_mail_events (
+        id CHAR(36) PRIMARY KEY,
+        case_id CHAR(36) NOT NULL,
+        incoming_request_id CHAR(36) NULL,
+        direction VARCHAR(12) NOT NULL,
+        event_type VARCHAR(40) NOT NULL,
+        message_id VARCHAR(255) NULL,
+        trigger_message_id VARCHAR(255) NULL,
+        in_reply_to VARCHAR(255) NULL,
+        subject VARCHAR(998) NOT NULL,
+        counterparty_email VARCHAR(255) NULL,
+        missing_document_types TEXT NULL,
+        status VARCHAR(20) NOT NULL,
+        error_message VARCHAR(800) NULL,
+        created_at DATETIME(3) NOT NULL,
+        sent_at DATETIME(3) NULL,
+        updated_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_case_mail_message (message_id),
+        UNIQUE KEY uq_case_mail_trigger (case_id, trigger_message_id, event_type),
+        INDEX idx_case_mail_events (case_id, created_at),
+        INDEX idx_case_mail_status (event_type, status, created_at),
+        CONSTRAINT fk_case_mail_event_case FOREIGN KEY (case_id)
+          REFERENCES generated_cases(id) ON DELETE CASCADE,
+        CONSTRAINT fk_case_mail_event_incoming FOREIGN KEY (incoming_request_id)
+          REFERENCES incoming_requests(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    `);
     await this.pool.query(
       `INSERT INTO email_settings
         (id, email_address, username, incoming_host, incoming_port, incoming_secure,

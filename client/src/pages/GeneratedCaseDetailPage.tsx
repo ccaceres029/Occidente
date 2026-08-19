@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowLeft, CheckCircle2, Download, Eye, File, FileStack, HardDrive, Mail, RefreshCw, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, CheckCircle2, Download, Eye, File, FileStack, HardDrive, Mail, MailCheck, RefreshCw, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
@@ -131,7 +131,15 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
           </div>
           <div className="document-completeness__action">
             <Button variant="ghost" icon={<RefreshCw size={15} />} loading={analyzing} onClick={() => void analyzeCase()}>Analizar de nuevo</Button>
-            <small>Control de presencia; no valida contenido ni autenticidad.</small>
+            {detail.missingDocumentRequest?.status === 'SENT' ? (
+              <span className="document-completeness__mail-status" title={detail.missingDocumentRequest.subject}>
+                <MailCheck size={13} /> Solicitud enviada{detail.missingDocumentRequest.sentAt ? ` · ${dateLabel(detail.missingDocumentRequest.sentAt)}` : ''}
+              </span>
+            ) : detail.missingDocumentRequest?.status === 'ERROR' ? (
+              <span className="document-completeness__mail-status is-error" title={detail.missingDocumentRequest.error}>
+                <AlertTriangle size={13} /> Error al enviar correo
+              </span>
+            ) : <small>Control de presencia; no valida contenido ni autenticidad.</small>}
           </div>
         </section>
       )}
