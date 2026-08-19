@@ -55,4 +55,6 @@ pnpm build
 - Gemini recibe únicamente un resumen estructurado del caso sintético, nunca los archivos reales del expediente usado como referencia.
 - Los identificadores sensibles se muestran enmascarados.
 - Las decisiones quedan registradas en una bitácora local.
-- El almacenamiento JSON y la autenticación simulada son adecuados solo para demostración local, no para producción.
+- En producción, la autenticación, las sesiones, los expedientes, la auditoría y la bandeja de solicitudes usan MySQL `dbOccidente`.
+- La cuenta de correo se conecta por IMAP TLS para entrada y SMTP TLS para salida; su contraseña se almacena cifrada.
+- Los documentos cargados permanecen en el volumen persistente del servidor y MySQL conserva su metadata y referencia.

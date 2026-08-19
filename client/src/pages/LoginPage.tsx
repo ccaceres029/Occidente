@@ -13,7 +13,7 @@ import {
 import { OccidenteMark } from '../components/Brand';
 
 type LoginPageProps = {
-  onLogin: () => void;
+  onLogin: (credentials: { username: string; password: string; rememberDevice: boolean }) => Promise<void>;
 };
 
 export default function LoginPage({ onLogin }: LoginPageProps) {
@@ -22,8 +22,9 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
   const [rememberDevice, setRememberDevice] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  const submitLogin = (event: FormEvent) => {
+  const submitLogin = async (event: FormEvent) => {
     event.preventDefault();
 
     if (!username.trim() || !password.trim()) {
@@ -32,7 +33,14 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     }
 
     setError('');
-    onLogin();
+    setSubmitting(true);
+    try {
+      await onLogin({ username: username.trim(), password, rememberDevice });
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : 'No fue posible iniciar sesión.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -124,14 +132,14 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
 
           {error && <p className="login-error" role="alert">{error}</p>}
 
-          <button className="login-submit" type="submit">
-            <span>Entrar</span>
+          <button className="login-submit" disabled={submitting} type="submit">
+            <span>{submitting ? 'Validando…' : 'Entrar'}</span>
             <ArrowRight size={18} />
           </button>
 
           <footer>
             <CheckCircle2 size={17} />
-            <span>Modulo inicial listo para conectar autenticacion real.</span>
+            <span>Autenticación y sesión protegida con dbOccidente.</span>
           </footer>
         </form>
       </section>

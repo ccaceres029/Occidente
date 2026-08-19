@@ -4,16 +4,20 @@ import {
   Bell,
   ArrowRight,
   ClipboardList,
+  Inbox,
   FilePlus2,
   HelpCircle,
   LayoutDashboard,
   Menu,
+  LogOut,
+  Mail,
   Search,
   ShieldCheck,
   X,
 } from 'lucide-react';
 import { api } from '../api';
 import type { HealthData } from '../types';
+import type { AuthUser } from '../types';
 import { OccidenteMark } from './Brand';
 import { Badge } from './ui';
 import { spanishDynamicText } from '../utils';
@@ -24,9 +28,11 @@ const titles: Array<[RegExp, string, string]> = [
   [/^\/casos\/[^/]+/, 'Expediente 360', 'Análisis, decisión y trazabilidad'],
   [/^\/casos/, 'Bandeja de afiliaciones', 'Prioriza y gestiona los expedientes'],
   [/^\/politicas/, 'Políticas y reglas', 'Parametrización del motor de control'],
+  [/^\/solicitudes/, 'Solicitudes entrantes', 'Correos recibidos para iniciar el proceso'],
+  [/^\/configuracion\/correo/, 'Configuración de correo', 'Conexiones IMAP y SMTP del portal'],
 ];
 
-export default function Shell() {
+export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [health, setHealth] = useState<HealthData | null>(null);
   const [queueTotal, setQueueTotal] = useState<number | null>(null);
@@ -69,6 +75,10 @@ export default function Shell() {
     const term = globalSearch.trim();
     navigate(term ? `/casos?search=${encodeURIComponent(term)}` : '/casos');
   };
+  const initials = user.displayName.split(/\s+/u).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+  const logout = async () => {
+    try { await api.logout(); } finally { onLogout(); }
+  };
 
   return (
     <div className="app-shell">
@@ -90,9 +100,13 @@ export default function Shell() {
           <NavLink to="/" end><LayoutDashboard size={19} /><span>Resumen operativo</span></NavLink>
           <NavLink to="/casos" end><ClipboardList size={19} /><span>Bandeja de casos</span>{queueTotal !== null && <kbd>{queueTotal}</kbd>}</NavLink>
           <NavLink to="/casos/nuevo"><FilePlus2 size={19} /><span>Nueva afiliación</span></NavLink>
+          <NavLink to="/solicitudes"><Inbox size={19} /><span>Solicitudes entrantes</span></NavLink>
 
           <span className="nav-group-label nav-group-label--spaced">Control</span>
           <NavLink to="/politicas"><ShieldCheck size={19} /><span>Políticas y reglas</span><em>Demo</em></NavLink>
+
+          <span className="nav-group-label nav-group-label--spaced">Configuración</span>
+          <NavLink to="/configuracion/correo"><Mail size={19} /><span>Correo IMAP / SMTP</span></NavLink>
         </nav>
 
         <div className="sidebar__bottom">
@@ -100,9 +114,10 @@ export default function Shell() {
             <ShieldCheck size={18} />
             <div><strong>Decisión supervisada</strong><span>La IA no aprueba casos</span></div>
           </div>
-          <div className="user-card" aria-label="Usuario activo: Cinthia M., Afiliaciones, Usuario B">
-            <span className="avatar">CM</span>
-            <span><strong>Cinthia M.</strong><small>Afiliaciones · Usuario B</small></span>
+          <div className="user-card" aria-label={`Usuario activo: ${user.displayName}`}>
+            <span className="avatar">{initials || 'U'}</span>
+            <span><strong>{user.displayName}</strong><small>{user.role}</small></span>
+            <button type="button" onClick={() => void logout()} title="Cerrar sesión" aria-label="Cerrar sesión"><LogOut size={16} /></button>
           </div>
         </div>
       </aside>

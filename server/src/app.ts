@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import {
   APPLICATION_PREFILL_MAX_BYTES,
   generateApplicationPrefillSample,
@@ -12,7 +13,14 @@ import {
   prefillApplicationFromPdf,
 } from './applicationPrefill.js';
 import { summarizeCase } from './ai.js';
-import { resolveGeminiConfig, type GeminiConfig } from './config.js';
+import {
+  resolveBootstrapUser,
+  resolveDatabaseConfig,
+  resolveGeminiConfig,
+  resolveMailRuntimeConfig,
+  type DatabaseConfig,
+  type GeminiConfig,
+} from './config.js';
 import { generateSyntheticContract } from './contractPdf.js';
 import { buildCorePayload } from './corePayload.js';
 import {
@@ -24,9 +32,11 @@ import {
 import { DOCUMENT_PREVIEW_MAX_PAGE, DocumentPreviewCache } from './documentPreview.js';
 import { applyVerifiedPdfEvidence, PdfEvidenceLocator } from './pdfEvidenceLocator.js';
 import { STAGE_LABELS, STATUS_LABELS, STATUS_PROGRESS } from './labels.js';
+import { MailService, type MailSettingsInput } from './mail.js';
+import { MysqlStore, type AuthUser } from './mysqlStore.js';
 import { getPolicyCatalog } from './policyCatalog.js';
 import { allowedActions, evaluateCaseRules } from './rules.js';
-import { JsonStore } from './store.js';
+import { JsonStore, type CaseStore } from './store.js';
 import { generateSyntheticDocumentPdf } from './syntheticDocumentPdf.js';
 import type {
   AfpcCase,
@@ -45,6 +55,14 @@ export interface BuildAppOptions {
   dataDir?: string;
   logger?: boolean;
   geminiConfig?: GeminiConfig;
+  databaseConfig?: DatabaseConfig | null;
+  authDisabled?: boolean;
+}
+
+interface LoginBody {
+  username?: unknown;
+  password?: unknown;
+  rememberDevice?: unknown;
 }
 
 interface CaseParams {
@@ -99,7 +117,7 @@ function withLiveSla(afpcCase: AfpcCase): AfpcCase {
   };
 }
 
-function detail(store: JsonStore, afpcCase: AfpcCase): CaseDetail {
+function detail(store: CaseStore, afpcCase: AfpcCase): CaseDetail {
   const live = withLiveSla(afpcCase);
   return {
     ...live,
@@ -108,7 +126,7 @@ function detail(store: JsonStore, afpcCase: AfpcCase): CaseDetail {
   };
 }
 
-function ensureCase(store: JsonStore, caseId: string): AfpcCase {
+function ensureCase(store: CaseStore, caseId: string): AfpcCase {
   const found = store.findCase(caseId);
   if (!found) throw new WorkflowError(`No se encontró el caso ${caseId}.`, 404);
   return found;
@@ -228,7 +246,7 @@ function mergeCaseInput(current: AfpcCase, input: CaseInput): AfpcCase {
   };
 }
 
-function createCaseInput(store: JsonStore, input: CaseInput): AfpcCase {
+function createCaseInput(store: CaseStore, input: CaseInput): AfpcCase {
   const number = store.listCases().length + 1;
   const padded = String(number).padStart(3, '0');
   const createdAt = new Date().toISOString();
@@ -296,7 +314,7 @@ function createCaseInput(store: JsonStore, input: CaseInput): AfpcCase {
   };
 }
 
-function dashboard(store: JsonStore) {
+function dashboard(store: CaseStore) {
   const cases = store.listCases().map(withLiveSla);
   const auditEvents = cases.flatMap((item) => store.listAudit(item.id));
   const count = (statuses: AfpcCase['status'][]) =>
@@ -376,16 +394,28 @@ function dashboard(store: JsonStore) {
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? false });
-  const store = new JsonStore(options.dataDir ?? defaultDataDir);
+  const dataDir = options.dataDir ?? defaultDataDir;
+  const databaseConfig = options.databaseConfig === undefined ? resolveDatabaseConfig() : options.databaseConfig;
+  const mysqlStore = !options.dataDir && databaseConfig
+    ? new MysqlStore(databaseConfig, dataDir, resolveBootstrapUser())
+    : undefined;
+  const store: CaseStore = mysqlStore ?? new JsonStore(dataDir);
   const documentPreviewCache = new DocumentPreviewCache({
     cacheDir: path.join(store.dataDir, 'preview-cache'),
   });
   const pdfEvidenceLocator = new PdfEvidenceLocator();
   const geminiConfig = options.geminiConfig ?? resolveGeminiConfig();
+  const mailRuntime = resolveMailRuntimeConfig();
+  const mailService = mysqlStore
+    ? new MailService(mysqlStore.databasePool(), mailRuntime.credentialsKey)
+    : undefined;
+  const authEnabled = Boolean(mysqlStore && !options.authDisabled);
   await store.initialize();
 
+  await app.register(cookie);
   await app.register(cors, {
     origin: true,
+    credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
   });
   await app.register(multipart, {
@@ -418,13 +448,89 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   });
 
+  app.addHook('onRequest', async (request) => {
+    if (!authEnabled || !mysqlStore) return;
+    const pathname = request.url.split('?')[0];
+    if (pathname === '/api/health' || pathname === '/api/auth/login') return;
+    const user = await mysqlStore.resolveSession(request.cookies.occidente_session);
+    if (!user) throw new WorkflowError('La sesión no es válida o expiró.', 401);
+    (request as FastifyRequest & { authUser?: AuthUser }).authUser = user;
+  });
+
+  const requestUser = (request: FastifyRequest): AuthUser | undefined =>
+    (request as FastifyRequest & { authUser?: AuthUser }).authUser;
+
+  app.post<{ Body: LoginBody }>('/api/auth/login', async (request, reply) => {
+    if (!mysqlStore) throw new WorkflowError('La autenticación requiere la conexión MySQL.', 503);
+    const username = typeof request.body?.username === 'string' ? request.body.username : '';
+    const password = typeof request.body?.password === 'string' ? request.body.password : '';
+    if (!username.trim() || !password) throw new WorkflowError('Ingrese usuario y contraseña.', 400);
+    const user = await mysqlStore.authenticate(username, password);
+    if (!user) throw new WorkflowError('Usuario o contraseña incorrectos.', 401);
+    const rememberDevice = request.body?.rememberDevice === true;
+    const session = await mysqlStore.createSession(user.id, rememberDevice);
+    reply.setCookie('occidente_session', session.token, {
+      path: '/',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      ...(rememberDevice ? { expires: session.expiresAt } : {}),
+    });
+    return { user };
+  });
+
+  app.get('/api/auth/me', async (request) => ({ user: requestUser(request) }));
+
+  app.post('/api/auth/logout', async (request, reply) => {
+    await mysqlStore?.deleteSession(request.cookies.occidente_session);
+    reply.clearCookie('occidente_session', { path: '/' });
+    return { ok: true };
+  });
+
   app.get('/api/health', async () => ({
     status: 'ok',
     service: 'afpc-occidente-demo-api',
     mode: 'demo-local',
     timestamp: new Date().toISOString(),
     geminiConfigured: geminiConfig.configured,
+    storage: store.storageMode,
+    database: mysqlStore?.databaseName,
   }));
+
+  app.get('/api/settings/email', async () => {
+    if (!mailService) throw new WorkflowError('El correo requiere la conexión MySQL.', 503);
+    return mailService.getSettings();
+  });
+
+  app.put<{ Body: MailSettingsInput }>('/api/settings/email', async (request) => {
+    if (!mailService) throw new WorkflowError('El correo requiere la conexión MySQL.', 503);
+    const user = requestUser(request);
+    if (user?.role !== 'ADMIN') throw new WorkflowError('Solo un administrador puede cambiar el correo.', 403);
+    const body = request.body;
+    if (!body?.emailAddress || !body.username || !body.incomingHost || !body.outgoingHost) {
+      throw new WorkflowError('Complete los datos obligatorios del correo.', 400);
+    }
+    if (![body.incomingPort, body.outgoingPort].every((port) => Number.isInteger(port) && port > 0 && port <= 65_535)) {
+      throw new WorkflowError('Los puertos de correo no son válidos.', 400);
+    }
+    return mailService.updateSettings(body, user.displayName);
+  });
+
+  app.post('/api/settings/email/test', async (request) => {
+    if (!mailService) throw new WorkflowError('El correo requiere la conexión MySQL.', 503);
+    if (requestUser(request)?.role !== 'ADMIN') throw new WorkflowError('Solo un administrador puede probar el correo.', 403);
+    return mailService.testConnections();
+  });
+
+  app.get<{ Querystring: { limit?: string } }>('/api/incoming-requests', async (request) => {
+    if (!mailService) throw new WorkflowError('La bandeja requiere la conexión MySQL.', 503);
+    return { items: await mailService.listIncoming(Number(request.query.limit || 100)) };
+  });
+
+  app.post('/api/incoming-requests/sync', async () => {
+    if (!mailService) throw new WorkflowError('La bandeja requiere la conexión MySQL.', 503);
+    return mailService.syncIncoming();
+  });
 
   app.get('/api/dashboard', async () => dashboard(store));
 
@@ -957,6 +1063,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     await documentPreviewCache.clear();
     pdfEvidenceLocator.clear();
     return { ok: true, message: 'Datos sintéticos restaurados.', dashboard: dashboard(store) };
+  });
+
+  let mailTimer: NodeJS.Timeout | undefined;
+  if (mailService && mailRuntime.credentialsKey) {
+    mailTimer = setInterval(() => {
+      void mailService.syncIncoming().catch((error) => app.log.warn({ error }, 'No se pudo sincronizar el buzón IMAP'));
+    }, mailRuntime.syncIntervalSeconds * 1000);
+    mailTimer.unref();
+    void mailService.syncIncoming().catch((error) => app.log.warn({ error }, 'Sincronización IMAP inicial pendiente'));
+  }
+
+  app.addHook('onClose', async () => {
+    if (mailTimer) clearInterval(mailTimer);
+    await store.close();
   });
 
   return app;

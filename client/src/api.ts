@@ -2,6 +2,7 @@ import type {
   ActionResponse,
   ApplicationPrefillResponse,
   AiSummaryResponse,
+  AuthUser,
   CaseDetail,
   CasesResponse,
   CorePayloadResponse,
@@ -9,6 +10,8 @@ import type {
   DashboardData,
   DocumentAiInsights,
   HealthData,
+  IncomingRequest,
+  MailSettings,
   PolicyCatalog,
   ValidationResponse,
 } from './types';
@@ -31,7 +34,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(`${API_ROOT}${path}`, { ...init, headers });
+  const response = await fetch(`${API_ROOT}${path}`, { ...init, headers, credentials: 'same-origin' });
   if (!response.ok) {
     const messages: Record<number, string> = {
       400: 'La solicitud no es válida. Revisa los datos e intenta nuevamente.',
@@ -47,18 +50,39 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       502: 'El servicio local no pudo comunicarse con una dependencia.',
       503: 'El servicio local no está disponible temporalmente.',
     };
-    const message = messages[response.status] || `No fue posible completar la operación (${response.status}).`;
+    let serverMessage = '';
+    try {
+      const body = await response.json() as { message?: unknown };
+      serverMessage = typeof body.message === 'string' ? body.message : '';
+    } catch {}
+    const message = serverMessage || messages[response.status] || `No fue posible completar la operación (${response.status}).`;
+    if (response.status === 401 && path !== '/auth/login') {
+      window.dispatchEvent(new Event('occidente:unauthorized'));
+    }
     throw new ApiError(message, response.status);
   }
   return response.json() as Promise<T>;
 }
 
 export const api = {
+  login: (username: string, password: string, rememberDevice: boolean) =>
+    request<{ user: AuthUser }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, rememberDevice }),
+    }),
+  me: () => request<{ user: AuthUser }>('/auth/me'),
+  logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
   health: () => request<HealthData>('/health'),
   dashboard: () => request<DashboardData>('/dashboard'),
   resetDemoData: () =>
     request<{ ok: boolean; message: string; dashboard: DashboardData }>('/demo/reset', { method: 'POST' }),
   policies: () => request<PolicyCatalog>('/policies'),
+  emailSettings: () => request<MailSettings>('/settings/email'),
+  saveEmailSettings: (settings: Omit<MailSettings, 'hasPassword' | 'lastSyncAt' | 'lastImapStatus' | 'lastSmtpStatus' | 'lastError' | 'updatedAt'> & { password?: string }) =>
+    request<MailSettings>('/settings/email', { method: 'PUT', body: JSON.stringify(settings) }),
+  testEmailSettings: () => request<{ imap: 'OK'; smtp: 'OK' }>('/settings/email/test', { method: 'POST' }),
+  incomingRequests: () => request<{ items: IncomingRequest[] }>('/incoming-requests'),
+  syncIncomingRequests: () => request<{ imported: number; total: number }>('/incoming-requests/sync', { method: 'POST' }),
   cases: (filters?: { status?: string; search?: string }) => {
     const params = new URLSearchParams();
     if (filters?.status) params.set('status', filters.status);

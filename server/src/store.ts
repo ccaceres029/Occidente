@@ -4,10 +4,37 @@ import path from 'node:path';
 import { createSeedDatabase } from './seed.js';
 import type { AfpcCase, AuditEvent, DemoDatabase } from './types.js';
 
-export class JsonStore {
+export type AuditInput = Omit<AuditEvent, 'id' | 'createdAt'> &
+  Partial<Pick<AuditEvent, 'id' | 'createdAt'>>;
+
+export interface CaseStore {
+  readonly dataDir: string;
+  readonly uploadsDir: string;
+  readonly storageMode: 'json' | 'mysql';
+  initialize(): Promise<void>;
+  close(): Promise<void>;
+  listCases(): AfpcCase[];
+  findCase(caseId: string): AfpcCase | undefined;
+  listAudit(caseId: string): AuditEvent[];
+  saveCase(afpcCase: AfpcCase): Promise<AfpcCase>;
+  addAudit(event: AuditInput): Promise<AuditEvent>;
+  saveCaseAndAudit(
+    afpcCase: AfpcCase,
+    event: Omit<AuditEvent, 'id' | 'createdAt'>,
+  ): Promise<AuditEvent>;
+  mutateCaseAndAudit(
+    caseId: string,
+    mutate: (current: AfpcCase) => AfpcCase,
+    event: (current: AfpcCase, updated: AfpcCase) => Omit<AuditEvent, 'id' | 'createdAt'>,
+  ): Promise<{ afpcCase: AfpcCase; auditEvent: AuditEvent }>;
+  reset(): Promise<void>;
+}
+
+export class JsonStore implements CaseStore {
   readonly dataDir: string;
   readonly databasePath: string;
   readonly uploadsDir: string;
+  readonly storageMode = 'json' as const;
   private state: DemoDatabase | undefined;
   private writeQueue: Promise<void> = Promise.resolve();
   private mutationQueue: Promise<void> = Promise.resolve();
@@ -32,6 +59,8 @@ export class JsonStore {
       await this.persist();
     }
   }
+
+  async close(): Promise<void> {}
 
   private database(): DemoDatabase {
     if (!this.state) throw new Error('La base local aún no fue inicializada.');
@@ -74,7 +103,7 @@ export class JsonStore {
     return structuredClone(afpcCase);
   }
 
-  async addAudit(event: Omit<AuditEvent, 'id' | 'createdAt'> & Partial<Pick<AuditEvent, 'id' | 'createdAt'>>): Promise<AuditEvent> {
+  async addAudit(event: AuditInput): Promise<AuditEvent> {
     const complete: AuditEvent = {
       ...event,
       id: event.id ?? randomUUID(),

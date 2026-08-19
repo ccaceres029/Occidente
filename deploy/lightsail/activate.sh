@@ -5,6 +5,7 @@ APP_ROOT="${APP_ROOT:-/var/www/Occidente}"
 APP_DIR="${APP_DIR:-$APP_ROOT/app}"
 SHARED_DIR="${SHARED_DIR:-$APP_ROOT/shared}"
 DATA_DIR="$SHARED_DIR/server-data"
+RDS_CA="$SHARED_DIR/rds-ca-global.pem"
 SERVICE_FILE="/etc/systemd/system/occidente.service"
 NGINX_FILE="/etc/nginx/sites-available/occidente.appsmacao.biz"
 TLS_CERT="/etc/letsencrypt/live/occidente.appsmacao.biz/fullchain.pem"
@@ -21,6 +22,13 @@ find "$APP_DIR/client/dist" -type f -exec chmod 644 {} +
 
 rm -rf "$APP_DIR/server/data"
 ln -sfn "$DATA_DIR" "$APP_DIR/server/data"
+
+if [ ! -s "$RDS_CA" ]; then
+  curl --fail --silent --show-error \
+    https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+    --output "$RDS_CA"
+  chmod 600 "$RDS_CA"
+fi
 
 sudo env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack enable
 sudo env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare pnpm@11.16.0 --activate

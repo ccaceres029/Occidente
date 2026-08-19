@@ -8,6 +8,45 @@ export type CaseStatus =
   | 'archived'
   | string;
 
+export interface AuthUser {
+  id: string;
+  username: string;
+  displayName: string;
+  role: string;
+}
+
+export interface MailSettings {
+  emailAddress: string;
+  username: string;
+  incomingHost: string;
+  incomingPort: number;
+  incomingSecure: boolean;
+  outgoingHost: string;
+  outgoingPort: number;
+  outgoingSecure: boolean;
+  enabled: boolean;
+  hasPassword: boolean;
+  lastSyncAt?: string;
+  lastImapStatus: string;
+  lastSmtpStatus: string;
+  lastError?: string;
+  updatedAt: string;
+}
+
+export interface IncomingRequest {
+  id: string;
+  messageId: string;
+  mailboxUid: number;
+  subject: string;
+  senderName?: string;
+  senderEmail?: string;
+  receivedAt: string;
+  snippet?: string;
+  hasAttachments: boolean;
+  attachmentCount: number;
+  status: string;
+}
+
 export interface ClientData {
   fullName: string;
   idType: string;
@@ -148,6 +187,8 @@ export interface HealthData {
   mode: string;
   timestamp: string;
   geminiConfigured: boolean;
+  storage?: string;
+  database?: string;
 }
 
 export interface PolicyRule {

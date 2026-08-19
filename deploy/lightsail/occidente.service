@@ -1,6 +1,7 @@
 [Unit]
 Description=AFPC Occidente API
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -8,6 +9,7 @@ WorkingDirectory=/var/www/Occidente/app
 Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
 Environment=PORT=3001
+EnvironmentFile=-/var/www/Occidente/shared/occidente.env
 ExecStart=/usr/bin/node /var/www/Occidente/app/server/dist/index.js
 Restart=always
 RestartSec=5
