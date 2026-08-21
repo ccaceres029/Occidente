@@ -396,6 +396,7 @@ export class MysqlStore implements CaseStore {
     `);
     await this.ensureUserPreferenceColumns();
     await this.ensureMailIntakeColumns();
+    await this.ensureGeneratedCaseFinalizationColumns();
     await this.pool.query(
       `INSERT INTO email_settings
         (id, email_address, username, incoming_host, incoming_port, incoming_secure,
@@ -447,6 +448,29 @@ export class MysqlStore implements CaseStore {
       await this.pool.query(
         'UPDATE incoming_requests SET source_moved_at=UTC_TIMESTAMP(3) WHERE source_moved_at IS NULL',
       );
+    }
+  }
+
+  private async ensureGeneratedCaseFinalizationColumns(): Promise<void> {
+    const columns = [
+      ['finalized_at', 'ALTER TABLE generated_cases ADD COLUMN finalized_at DATETIME(3) NULL AFTER updated_at'],
+      ['finalized_by', 'ALTER TABLE generated_cases ADD COLUMN finalized_by VARCHAR(255) NULL AFTER finalized_at'],
+    ] as const;
+    for (const [columnName, statement] of columns) {
+      const [rows] = await this.pool.query<RowDataPacket[]>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='generated_cases' AND COLUMN_NAME=? LIMIT 1`,
+        [columnName],
+      );
+      if (!rows[0]) await this.pool.query(statement);
+    }
+    const [indexes] = await this.pool.query<RowDataPacket[]>(
+      `SELECT INDEX_NAME FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='generated_cases'
+         AND INDEX_NAME='idx_generated_finalized' LIMIT 1`,
+    );
+    if (!indexes[0]) {
+      await this.pool.query('ALTER TABLE generated_cases ADD INDEX idx_generated_finalized (finalized_at, received_at)');
     }
   }
 

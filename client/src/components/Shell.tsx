@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell,
   ArrowRight,
+  Archive,
   ClipboardList,
   Inbox,
   FilePlus2,
@@ -29,6 +30,7 @@ const titles: Array<[RegExp, string, string]> = [
   [/^\/$/, 'Resumen operativo', 'Solicitudes entrantes y casos generados'],
   [/^\/casos-generados\/[^/]+/, 'Caso generado', 'Correo recibido y documentos almacenados'],
   [/^\/casos-generados/, 'Casos generados', 'Solicitudes codificadas desde el correo'],
+  [/^\/casos-finalizados/, 'Casos finalizados', 'Aprobados y listos para generar archivos de carga'],
   [/^\/casos\/nuevo/, 'Nueva afiliación', 'Captura guiada y prevalidación'],
   [/^\/casos\/[^/]+/, 'Expediente 360', 'Análisis, decisión y trazabilidad'],
   [/^\/casos/, 'Bandeja de afiliaciones', 'Prioriza y gestiona los expedientes'],
@@ -106,6 +108,7 @@ export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: ()
           <NavLink to="/" end><LayoutDashboard size={19} /><span>Resumen operativo</span></NavLink>
           <NavLink to="/solicitudes"><Inbox size={19} /><span>Solicitudes entrantes</span></NavLink>
           <NavLink to="/casos-generados"><FolderKanban size={19} /><span>Casos generados</span></NavLink>
+          <NavLink to="/casos-finalizados"><Archive size={19} /><span>Casos finalizados</span></NavLink>
 
           <span className="nav-group-label nav-group-label--spaced">Control</span>
           <NavLink to="/politicas"><ShieldCheck size={19} /><span>Políticas y reglas</span><em>Demo</em></NavLink>

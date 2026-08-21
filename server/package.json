@@ -1,6 +1,6 @@
 {
   "name": "@occi/server",
-  "version": "0.5.12",
+  "version": "0.5.13",
   "private": true,
   "type": "module",
   "description": "API local para el demo de afiliaciones AFPC Occidente",
@@ -17,10 +17,12 @@
     "@fastify/multipart": "^9.2.1",
     "fastify": "^5.6.1",
     "imapflow": "^1.7.1",
+    "jszip": "^3.10.1",
     "mailparser": "^3.9.15",
     "mysql2": "^3.23.3",
     "nodemailer": "^9.0.5",
-    "pdfkit": "^0.17.2"
+    "pdfkit": "^0.17.2",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/mailparser": "^3.4.6",

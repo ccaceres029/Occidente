@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { ImapFlow } from 'imapflow';
 import { simpleParser, type Attachment, type ParsedMail } from 'mailparser';
 import nodemailer from 'nodemailer';
-import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import {
   buildMissingDocumentsMessage,
   extractCaseCode,
@@ -20,6 +20,7 @@ import {
   GENERATED_CASE_INTELLIGENCE_VERSION,
   generatedCaseIntelligenceFingerprint,
 } from './generatedCaseIntelligence.js';
+import { buildFinalizedCasesArchive } from './finalizedCaseExports.js';
 import { ObjectStorage } from './objectStorage.js';
 import { applyVerifiedBufferedPdfEvidence } from './pdfEvidenceLocator.js';
 import type { DocumentIntelligenceInsight, RiskAssessment } from './types.js';
@@ -92,6 +93,8 @@ export interface GeneratedCaseSummary {
   receivedAt: string;
   documentCount: number;
   createdAt: string;
+  finalizedAt?: string;
+  finalizedBy?: string;
   documentAnalysis?: DocumentCompletenessAnalysis;
   workflow: GeneratedCaseWorkflow;
   risk?: RiskAssessment;
@@ -135,7 +138,7 @@ export interface MailOperationalDashboard {
 }
 
 export interface GeneratedCaseWorkflow {
-  stage: 'DOCUMENT_INCOMPLETE' | 'READY_FOR_ANALYSIS' | 'ANALYZING' | 'DECISION_PENDING' | 'ANALYSIS_ERROR';
+  stage: 'DOCUMENT_INCOMPLETE' | 'READY_FOR_ANALYSIS' | 'ANALYZING' | 'DECISION_PENDING' | 'ANALYSIS_ERROR' | 'FINALIZED';
   label: string;
   progress: number;
 }
@@ -201,6 +204,8 @@ interface GeneratedCaseRow extends RowDataPacket {
   received_at: Date;
   document_count: number;
   created_at: Date;
+  finalized_at: Date | null;
+  finalized_by: string | null;
   analysis_status: DocumentCompletenessAnalysis['status'] | null;
   analysis_provider: DocumentCompletenessAnalysis['provider'] | null;
   gemini_configured: number | null;
@@ -353,7 +358,9 @@ function publicIncoming(row: IncomingRow): IncomingRequest {
 }
 
 function publicGeneratedCase(row: GeneratedCaseRow): GeneratedCaseSummary {
-  const workflow: GeneratedCaseWorkflow = row.analysis_status !== 'COMPLETE'
+  const workflow: GeneratedCaseWorkflow = row.finalized_at
+    ? { stage: 'FINALIZED', label: 'Caso finalizado', progress: 100 }
+    : row.analysis_status !== 'COMPLETE'
     ? { stage: 'DOCUMENT_INCOMPLETE', label: 'Control documental', progress: 33 }
     : row.intelligence_status === 'ANALYZING'
       ? { stage: 'ANALYZING', label: 'Análisis en curso', progress: 68 }
@@ -372,6 +379,8 @@ function publicGeneratedCase(row: GeneratedCaseRow): GeneratedCaseSummary {
     receivedAt: row.received_at.toISOString(),
     documentCount: Number(row.document_count),
     createdAt: row.created_at.toISOString(),
+    ...(row.finalized_at ? { finalizedAt: row.finalized_at.toISOString() } : {}),
+    ...(row.finalized_by ? { finalizedBy: row.finalized_by } : {}),
     workflow,
   };
   if (row.risk_level && row.risk_route && row.risk_score !== null) {
@@ -630,7 +639,7 @@ export class MailService {
     const [rows] = await this.pool.query<GeneratedCaseRow[]>(
       `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
         gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
-        gc.created_at,
+        gc.created_at, gc.finalized_at, gc.finalized_by,
         (SELECT COUNT(*) FROM generated_case_documents documents WHERE documents.case_id=gc.id) AS document_count,
         analysis.status AS analysis_status, analysis.provider AS analysis_provider,
         analysis.gemini_configured, analysis.completeness_percent, analysis.expected_count,
@@ -645,6 +654,7 @@ export class MailService {
        FROM generated_cases gc
        LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
        LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id
+       WHERE gc.finalized_at IS NULL
        ORDER BY gc.received_at DESC, gc.code DESC LIMIT ?`,
       [safeLimit],
     );
@@ -660,6 +670,76 @@ export class MailService {
     return generatedCases;
   }
 
+  async listFinalizedCases(limit = 250): Promise<GeneratedCaseSummary[]> {
+    const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const [rows] = await this.pool.query<GeneratedCaseRow[]>(
+      `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
+        gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
+        gc.created_at, gc.finalized_at, gc.finalized_by,
+        (SELECT COUNT(*) FROM generated_case_documents documents WHERE documents.case_id=gc.id) AS document_count,
+        analysis.status AS analysis_status, analysis.provider AS analysis_provider,
+        analysis.gemini_configured, analysis.completeness_percent, analysis.expected_count,
+        analysis.received_count, analysis.missing_count, analysis.unclassified_count,
+        analysis.summary AS analysis_summary, analysis.model AS analysis_model,
+        analysis.analysis_version, analysis.analyzed_at,
+        intelligence.status AS intelligence_status, intelligence.model AS intelligence_model,
+        intelligence.engine_version AS intelligence_engine_version,
+        NULL AS intelligence_result, intelligence.error_message AS intelligence_error,
+        intelligence.analyzed_at AS intelligence_analyzed_at,
+        intelligence.risk_level, intelligence.risk_score, intelligence.risk_route
+       FROM generated_cases gc
+       LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
+       LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id
+       WHERE gc.finalized_at IS NOT NULL
+       ORDER BY gc.finalized_at DESC, gc.code DESC LIMIT ?`,
+      [safeLimit],
+    );
+    return rows.map(publicGeneratedCase);
+  }
+
+  async finalizeGeneratedCase(id: string, actor: string): Promise<GeneratedCaseDetail | undefined> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE generated_cases
+       SET status='FINALIZED', finalized_at=COALESCE(finalized_at, UTC_TIMESTAMP(3)),
+         finalized_by=COALESCE(finalized_by, ?), updated_at=UTC_TIMESTAMP(3)
+       WHERE id=?`,
+      [actor, id],
+    );
+    if (!result.affectedRows) return undefined;
+    return this.getGeneratedCase(id, false);
+  }
+
+  async exportFinalizedCases(ids: string[]): Promise<{ archive: Buffer; count: number } | undefined> {
+    const uniqueIds = [...new Set(ids)].slice(0, 100);
+    if (!uniqueIds.length) return undefined;
+    const placeholders = uniqueIds.map(() => '?').join(',');
+    const [rows] = await this.pool.query<(RowDataPacket & {
+      id: string;
+      code: string;
+      sender_email: string | null;
+      received_at: Date;
+      finalized_at: Date;
+      intelligence_result: DocumentIntelligenceInsight | string | null;
+    })[]>(
+      `SELECT gc.id, gc.code, gc.sender_email, gc.received_at, gc.finalized_at,
+        intelligence.result_json AS intelligence_result
+       FROM generated_cases gc
+       LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id
+       WHERE gc.finalized_at IS NOT NULL AND gc.id IN (${placeholders})
+       ORDER BY gc.finalized_at, gc.code`,
+      uniqueIds,
+    );
+    if (rows.length !== uniqueIds.length) return undefined;
+    const archive = await buildFinalizedCasesArchive(rows.map((row) => ({
+      code: row.code,
+      ...(row.sender_email ? { senderEmail: row.sender_email } : {}),
+      receivedAt: row.received_at,
+      finalizedAt: row.finalized_at,
+      documentIntelligence: parseIntelligence(row.intelligence_result),
+    })));
+    return { archive, count: rows.length };
+  }
+
   async startReadyCaseAnalysis(limit = 3): Promise<number> {
     const safeLimit = Math.max(1, Math.min(10, Math.trunc(limit)));
     const [rows] = await this.pool.query<(RowDataPacket & { id: string })[]>(
@@ -668,6 +748,7 @@ export class MailService {
        INNER JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
        LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id
        WHERE analysis.status='COMPLETE' AND analysis.completeness_percent=100
+         AND gc.finalized_at IS NULL
          AND (intelligence.case_id IS NULL OR intelligence.status='ANALYZING'
            OR intelligence.engine_version<>?)
        ORDER BY analysis.updated_at, gc.received_at
@@ -686,14 +767,14 @@ export class MailService {
           (SELECT COUNT(*) FROM generated_cases) AS generated_total,
           (SELECT COUNT(*) FROM generated_case_documents) AS document_total,
           (SELECT COUNT(*) FROM incoming_requests WHERE status='NEW') AS pending_generation,
-          COALESCE(SUM(CASE WHEN analysis.status IS NULL OR analysis.status<>'COMPLETE' THEN 1 ELSE 0 END), 0) AS incomplete,
-          COALESCE(SUM(CASE WHEN analysis.status='COMPLETE' AND
+          COALESCE(SUM(CASE WHEN gc.finalized_at IS NULL AND (analysis.status IS NULL OR analysis.status<>'COMPLETE') THEN 1 ELSE 0 END), 0) AS incomplete,
+          COALESCE(SUM(CASE WHEN gc.finalized_at IS NULL AND analysis.status='COMPLETE' AND
             (intelligence.status IS NULL OR intelligence.status NOT IN ('ANALYZING', 'COMPLETE', 'ERROR'))
             THEN 1 ELSE 0 END), 0) AS ready_for_analysis,
-          COALESCE(SUM(CASE WHEN intelligence.status='ANALYZING' THEN 1 ELSE 0 END), 0) AS analyzing,
-          COALESCE(SUM(CASE WHEN intelligence.status='COMPLETE' THEN 1 ELSE 0 END), 0) AS decision_pending,
-          COALESCE(SUM(CASE WHEN intelligence.status='ERROR' THEN 1 ELSE 0 END), 0) AS analysis_error,
-          COALESCE(SUM(CASE WHEN intelligence.risk_route='CUMPLIMIENTO' THEN 1 ELSE 0 END), 0) AS compliance
+          COALESCE(SUM(CASE WHEN gc.finalized_at IS NULL AND intelligence.status='ANALYZING' THEN 1 ELSE 0 END), 0) AS analyzing,
+          COALESCE(SUM(CASE WHEN gc.finalized_at IS NULL AND intelligence.status='COMPLETE' THEN 1 ELSE 0 END), 0) AS decision_pending,
+          COALESCE(SUM(CASE WHEN gc.finalized_at IS NULL AND intelligence.status='ERROR' THEN 1 ELSE 0 END), 0) AS analysis_error,
+          COALESCE(SUM(CASE WHEN gc.finalized_at IS NULL AND intelligence.risk_route='CUMPLIMIENTO' THEN 1 ELSE 0 END), 0) AS compliance
          FROM generated_cases gc
          LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
          LEFT JOIN generated_case_intelligence intelligence ON intelligence.case_id=gc.id`,
@@ -723,7 +804,7 @@ export class MailService {
     const [caseRows] = await this.pool.query<GeneratedCaseRow[]>(
       `SELECT gc.id, gc.code, gc.incoming_request_id, gc.status,
         gc.subject, gc.sender_name, gc.sender_email, gc.received_at,
-        gc.created_at,
+        gc.created_at, gc.finalized_at, gc.finalized_by,
         (SELECT COUNT(*) FROM generated_case_documents documents WHERE documents.case_id=gc.id) AS document_count,
         analysis.status AS analysis_status, analysis.provider AS analysis_provider,
         analysis.gemini_configured, analysis.completeness_percent, analysis.expected_count,
@@ -858,7 +939,7 @@ export class MailService {
         );
       }
       await connection.query(
-        'UPDATE generated_cases SET status=?, updated_at=UTC_TIMESTAMP(3) WHERE id=?',
+        'UPDATE generated_cases SET status=IF(finalized_at IS NULL, ?, status), updated_at=UTC_TIMESTAMP(3) WHERE id=?',
         [analysis.status === 'COMPLETE' ? 'ANALYSIS_PENDING' : 'DOCUMENT_INCOMPLETE', id],
       );
       await connection.commit();
@@ -919,7 +1000,7 @@ export class MailService {
       [id, this.geminiConfig.model, currentFingerprint, GENERATED_CASE_INTELLIGENCE_VERSION],
     );
     await this.pool.query(
-      "UPDATE generated_cases SET status='ANALYZING', updated_at=UTC_TIMESTAMP(3) WHERE id=?",
+      "UPDATE generated_cases SET status=IF(finalized_at IS NULL, 'ANALYZING', status), updated_at=UTC_TIMESTAMP(3) WHERE id=?",
       [id],
     );
 
@@ -945,7 +1026,7 @@ export class MailService {
           new Date(result.insight.analysis.generatedAt), id],
       );
       await this.pool.query(
-        "UPDATE generated_cases SET status='DECISION_PENDING', updated_at=UTC_TIMESTAMP(3) WHERE id=?",
+        "UPDATE generated_cases SET status=IF(finalized_at IS NULL, 'DECISION_PENDING', status), updated_at=UTC_TIMESTAMP(3) WHERE id=?",
         [id],
       );
     } catch (error) {
@@ -958,7 +1039,7 @@ export class MailService {
         [message, id],
       );
       await this.pool.query(
-        "UPDATE generated_cases SET status='ANALYSIS_ERROR', updated_at=UTC_TIMESTAMP(3) WHERE id=?",
+        "UPDATE generated_cases SET status=IF(finalized_at IS NULL, 'ANALYSIS_ERROR', status), updated_at=UTC_TIMESTAMP(3) WHERE id=?",
         [id],
       );
     }
@@ -1446,7 +1527,7 @@ export class MailService {
           [incomingId],
         );
         await connection.query(
-          `UPDATE generated_cases SET status='DOCUMENTS_UPDATED', updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
+          `UPDATE generated_cases SET status=IF(finalized_at IS NULL, 'DOCUMENTS_UPDATED', status), updated_at=UTC_TIMESTAMP(3) WHERE id=?`,
           [linkedCase.id],
         );
         await connection.commit();

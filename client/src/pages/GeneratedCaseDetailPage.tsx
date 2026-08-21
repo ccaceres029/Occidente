@@ -40,7 +40,9 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmApproval, setConfirmApproval] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [activeView, setActiveView] = useState<'documents' | 'analysis'>('documents');
   const [toast, setToast] = useState<{ message: string; tone: 'success' | 'danger' } | null>(null);
@@ -104,6 +106,20 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
     }
   };
 
+  const approveCase = async () => {
+    if (!detail) return;
+    setApproving(true);
+    try {
+      await api.finalizeGeneratedCase(detail.id);
+      navigate('/casos-finalizados', { replace: true, state: { finalized: detail.code } });
+    } catch (approvalError) {
+      setToast({ message: approvalError instanceof Error ? approvalError.message : 'No fue posible aprobar el caso.', tone: 'danger' });
+      setConfirmApproval(false);
+    } finally {
+      setApproving(false);
+    }
+  };
+
   if (loading) return <LoadingState label="Cargando caso generado…" />;
   if (error || !detail) return <ErrorState message={error || 'No se encontró el caso generado.'} />;
 
@@ -118,6 +134,7 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
         </div>
         <div className="page-lead__actions">
           <Badge tone={detail.workflow.stage === 'ANALYSIS_ERROR' ? 'danger' : detail.workflow.stage === 'DOCUMENT_INCOMPLETE' ? 'warning' : 'success'} dot>{detail.workflow.label}</Badge>
+          {currentUser.role !== 'CONSULTA' && detail.workflow.stage !== 'FINALIZED' && <Button variant="success" icon={<CheckCircle2 size={16} />} onClick={() => setConfirmApproval(true)}>Apruebo</Button>}
           {currentUser.role === 'ADMIN' && <Button variant="danger" icon={<Trash2 size={16} />} onClick={() => setConfirmDelete(true)}>Eliminar caso</Button>}
         </div>
       </section>
@@ -126,10 +143,11 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
         {[
           { key: 'DOCUMENT', label: 'Control documental', detail: detail.documentAnalysis?.missingCount ? `${detail.documentAnalysis.completenessPercent}% recibido` : 'Paquete completo' },
           { key: 'ANALYSIS', label: 'Análisis del expediente', detail: detail.workflow.stage === 'ANALYZING' ? 'En ejecución' : detail.documentIntelligence ? 'Resultado disponible' : 'Pendiente' },
-          { key: 'DECISION', label: 'Decisión humana', detail: detail.workflow.stage === 'DECISION_PENDING' ? 'Acción requerida' : 'Pendiente' },
+          { key: 'DECISION', label: 'Decisión humana', detail: detail.workflow.stage === 'FINALIZED' ? 'Aprobado' : detail.workflow.stage === 'DECISION_PENDING' ? 'Acción requerida' : 'Pendiente' },
+          { key: 'FINALIZED', label: 'Caso finalizado', detail: detail.finalizedBy ? `Aprobado por ${detail.finalizedBy}` : 'Pendiente' },
         ].map((step, index) => {
-          const current = detail.workflow.stage === 'DOCUMENT_INCOMPLETE' ? 0 : ['READY_FOR_ANALYSIS', 'ANALYZING', 'ANALYSIS_ERROR'].includes(detail.workflow.stage) ? 1 : 2;
-          return <div className={index < current ? 'is-complete' : index === current ? 'is-current' : ''} key={step.key}><span>{index < current ? <Check size={15} /> : index + 1}</span><p><strong>{step.label}</strong><small>{step.detail}</small></p>{index < 2 && <i />}</div>;
+          const current = detail.workflow.stage === 'DOCUMENT_INCOMPLETE' ? 0 : ['READY_FOR_ANALYSIS', 'ANALYZING', 'ANALYSIS_ERROR'].includes(detail.workflow.stage) ? 1 : detail.workflow.stage === 'FINALIZED' ? 3 : 2;
+          return <div className={index < current ? 'is-complete' : index === current ? 'is-current' : ''} key={step.key}><span>{index < current ? <Check size={15} /> : index + 1}</span><p><strong>{step.label}</strong><small>{step.detail}</small></p>{index < 3 && <i />}</div>;
         })}
       </section>
 
@@ -208,6 +226,10 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
       ) : <EmptyState icon={<FileStack size={26} />} title="Caso sin documentos adjuntos" body="El correo fue codificado correctamente, pero no contenía archivos adjuntos." />)}
 
       {activeView === 'analysis' && <GeneratedCaseIntelligencePanel detail={detail} analyzing={analyzing} onAnalyze={() => void analyzeCase()} />}
+
+      <Modal open={confirmApproval} title="Aprobar y finalizar caso" description="Esta decisión humana moverá el expediente a Casos finalizados." onClose={() => !approving && setConfirmApproval(false)}>
+        <div className="case-approval-confirmation"><CheckCircle2 size={30} /><div><p>Confirmas que <strong>{detail.code}</strong> puede continuar.</p><small>La aprobación quedará registrada con tu usuario y la fecha actual.</small></div><footer><Button variant="ghost" onClick={() => setConfirmApproval(false)}>Cancelar</Button><Button variant="success" icon={<CheckCircle2 size={16} />} loading={approving} onClick={() => void approveCase()}>Sí, apruebo</Button></footer></div>
+      </Modal>
 
       <Modal open={confirmDelete} title="Eliminar caso en cascada" description="Esta acción es irreversible y está restringida a administradores." onClose={() => !deleting && setConfirmDelete(false)}>
         <div className="cascade-delete"><Trash2 size={28} /><div><p>Se eliminará <strong>{detail.code}</strong> junto con:</p><ul><li>El registro del correo recibido</li><li>Los {detail.documentCount} documentos relacionados</li><li>El control documental y el análisis integral</li><li>La carpeta completa del caso en S3</li></ul></div><footer><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancelar</Button><Button variant="danger" loading={deleting} onClick={() => void deleteCase()}>Eliminar definitivamente</Button></footer></div>

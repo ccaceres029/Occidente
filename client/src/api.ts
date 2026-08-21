@@ -102,6 +102,34 @@ export const api = {
   generatedCase: (id: string) => request<{ case: GeneratedCaseDetail }>(`/generated-cases/${id}`),
   analyzeGeneratedCase: (id: string) =>
     request<{ case: GeneratedCaseDetail }>(`/generated-cases/${id}/analyze`, { method: 'POST' }),
+  finalizeGeneratedCase: (id: string) =>
+    request<{ case: GeneratedCaseDetail }>(`/generated-cases/${id}/finalize`, { method: 'POST' }),
+  finalizedCases: () => request<{ items: GeneratedCaseSummary[] }>('/finalized-cases'),
+  async downloadFinalizedCases(caseIds: string[]) {
+    const response = await fetch(`${API_ROOT}/finalized-cases/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ caseIds }),
+    });
+    if (!response.ok) {
+      let message = 'No fue posible generar los archivos de afiliados y beneficiarios.';
+      try {
+        const body = await response.json() as { message?: unknown };
+        if (typeof body.message === 'string') message = body.message;
+      } catch {}
+      throw new ApiError(message, response.status);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'Casos_Finalizados_AFPC.zip';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  },
   generatedDocumentUrl: (caseId: string, documentId: string) =>
     `${API_ROOT}/generated-cases/${caseId}/documents/${documentId}/content`,
   generatedDocumentPreviewUrl: (caseId: string, documentId: string, page = 1) =>

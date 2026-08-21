@@ -111,9 +111,11 @@ export interface GeneratedCaseSummary {
   receivedAt: string;
   documentCount: number;
   createdAt: string;
+  finalizedAt?: string;
+  finalizedBy?: string;
   documentAnalysis?: DocumentCompletenessAnalysis;
   workflow: {
-    stage: 'DOCUMENT_INCOMPLETE' | 'READY_FOR_ANALYSIS' | 'ANALYZING' | 'DECISION_PENDING' | 'ANALYSIS_ERROR';
+    stage: 'DOCUMENT_INCOMPLETE' | 'READY_FOR_ANALYSIS' | 'ANALYZING' | 'DECISION_PENDING' | 'ANALYSIS_ERROR' | 'FINALIZED';
     label: string;
     progress: number;
   };

@@ -13,7 +13,7 @@ import type {
   SourceOfFundsInsight,
 } from './types.js';
 
-export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.2.1';
+export const GENERATED_CASE_INTELLIGENCE_VERSION = 'generated-case-intelligence-1.3.0';
 
 export interface GeneratedIntelligenceDocument {
   id: string;
@@ -88,21 +88,47 @@ const DOCUMENT_LABELS: Record<string, string> = {
 const ALLOWED_DOCUMENT_TYPES = Object.keys(DOCUMENT_LABELS);
 const FIELD_LABELS: Record<string, string> = {
   fullName: 'Nombre completo',
+  idType: 'Tipo de identificación',
   idNumber: 'Número de identificación',
   taxId: 'RTN',
   nationality: 'Nacionalidad',
   residenceCountry: 'País de residencia',
   city: 'Ciudad o domicilio',
+  department: 'Departamento',
+  municipality: 'Municipio',
+  sector: 'Sector o caserío',
+  address: 'Dirección de domicilio',
   birthDate: 'Fecha de nacimiento',
+  birthCountry: 'País de nacimiento',
+  birthDepartment: 'Departamento de nacimiento',
+  birthMunicipality: 'Municipio de nacimiento',
+  sex: 'Sexo',
+  civilStatus: 'Estado civil',
+  homePhone: 'Teléfono de residencia',
+  mobilePhone: 'Teléfono celular',
+  email: 'Correo electrónico',
   occupation: 'Ocupación',
+  position: 'Puesto',
   employer: 'Empleador',
+  employerTaxId: 'RTN del empleador',
+  employerLegalName: 'Razón social del empleador',
+  employerPhone: 'Teléfono del empleador',
+  employerAddress: 'Dirección del empleador',
+  employerEmail: 'Correo del empleador',
+  employerBusiness: 'Giro de la empresa',
+  businessActivity: 'Giro del negocio',
+  employmentStartDate: 'Fecha de inicio de labores',
   monthlyIncome: 'Ingreso mensual',
   plan: 'Plan solicitado',
   contributionAmount: 'Monto del aporte',
   currency: 'Moneda',
   contributionFrequency: 'Frecuencia del aporte',
   paymentMethod: 'Forma de pago',
+  paymentAccount: 'Cuenta de pago',
   sourceOfFunds: 'Procedencia de fondos',
+  purpose: 'Propósito de los fondos',
+  activityCode: 'Código de actividad',
+  educationLevel: 'Nivel de estudio',
   educationFinancialYear: 'Año de educación financiera',
   signaturesComplete: 'Firmas requeridas',
   fatcaPositive: 'Indicador FATCA',
@@ -119,6 +145,19 @@ const FIELD_LABELS: Record<string, string> = {
   transactionReference: 'Referencia de transacción',
   transactionDate: 'Fecha de transacción',
 };
+for (let index = 1; index <= 5; index += 1) {
+  Object.assign(FIELD_LABELS, {
+    [`beneficiary${index}FullName`]: `Nombre completo del beneficiario ${index}`,
+    [`beneficiary${index}IdType`]: `Tipo de identificación del beneficiario ${index}`,
+    [`beneficiary${index}IdNumber`]: `Identificación del beneficiario ${index}`,
+    [`beneficiary${index}Type`]: `Tipo directo o contingente del beneficiario ${index}`,
+    [`beneficiary${index}Sex`]: `Sexo del beneficiario ${index}`,
+    [`beneficiary${index}Percentage`]: `Porcentaje del beneficiario ${index}`,
+    [`beneficiary${index}Relationship`]: `Código de parentesco del beneficiario ${index}`,
+    [`beneficiary${index}Degree`]: `Grado del beneficiario ${index}`,
+    [`beneficiary${index}BirthDate`]: `Fecha de nacimiento del beneficiario ${index}`,
+  });
+}
 const ALLOWED_FIELDS = Object.keys(FIELD_LABELS);
 const NUMERIC_FIELDS = new Set(['monthlyIncome', 'contributionAmount', 'educationFinancialYear', 'beneficiaryPercentTotal']);
 const BOOLEAN_FIELDS = new Set([
@@ -199,7 +238,7 @@ const parseBoolean = (value: string): boolean | null => {
 };
 
 const parsedValue = (field: string, value: string): string | number | boolean | null => {
-  if (NUMERIC_FIELDS.has(field)) return value ? parseAmount(value) : null;
+  if (NUMERIC_FIELDS.has(field) || /^beneficiary\d+(Percentage|Relationship|Degree)$/u.test(field)) return value ? parseAmount(value) : null;
   if (BOOLEAN_FIELDS.has(field)) return parseBoolean(value);
   return value || null;
 };
@@ -399,6 +438,7 @@ async function extractWithGemini(
     `Tipos permitidos: ${ALLOWED_DOCUMENT_TYPES.join(', ')}.`,
     `Campos permitidos: ${ALLOWED_FIELDS.join(', ')}.`,
     'Para value usa texto tal como aparece. Para booleanos usa Si o No. Para montos incluye moneda cuando esté visible.',
+    'Extrae hasta cinco beneficiarios usando los campos beneficiary1...beneficiary5; conserva una misma numeración para todos los datos de cada persona y no inventes beneficiarios ausentes.',
     'pepDeclared solo puede extraerse cuando el documento menciona explícitamente PEP o Persona Expuesta Políticamente; ciudadanía o residencia estadounidense no significan PEP.',
     'fatcaPositive solo puede extraerse de la autocertificación FATCA y es verdadero si al menos una condición FATCA aplicable está marcada afirmativamente.',
     'evidence debe ser una cita breve del archivo y page la página donde se encontró. confidence va de 0 a 1.',

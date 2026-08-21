@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowRight, BrainCircuit, CalendarDays, CircleGauge, FileStack, FolderKanban, Mail, Search, Trash2 } from 'lucide-react';
+import { ArrowRight, BrainCircuit, CalendarDays, CheckCircle2, CircleGauge, FileStack, FolderKanban, Mail, Search, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
@@ -24,7 +24,9 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<GeneratedCaseSummary | null>(null);
+  const [confirmApproval, setConfirmApproval] = useState<GeneratedCaseSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone?: 'success' | 'danger' } | null>(null);
 
   const load = useCallback(async () => {
@@ -78,6 +80,24 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
     }
   };
 
+  const approveCase = async () => {
+    if (!confirmApproval) return;
+    setApproving(true);
+    try {
+      await api.finalizeGeneratedCase(confirmApproval.id);
+      setItems((current) => current.filter((item) => item.id !== confirmApproval.id));
+      setToast({ message: `${confirmApproval.code} fue aprobado y enviado a Casos finalizados.` });
+      setConfirmApproval(null);
+    } catch (approvalError) {
+      setToast({
+        message: approvalError instanceof Error ? approvalError.message : 'No fue posible aprobar el caso.',
+        tone: 'danger',
+      });
+    } finally {
+      setApproving(false);
+    }
+  };
+
   return (
     <div className="generated-cases-page">
       <section className="page-lead page-lead--compact">
@@ -117,6 +137,7 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
                 <FileStack size={12} /> {item.documentCount}{item.documentAnalysis ? ` · ${item.documentAnalysis.completenessPercent}%` : ''}
               </Badge>
               <div className="generated-list__actions">
+                {currentUser.role !== 'CONSULTA' && <button className="approve-case-button" type="button" onClick={() => setConfirmApproval(item)}><CheckCircle2 size={15} /> Apruebo</button>}
                 <Link to={`/casos-generados/${item.id}`} title="Abrir caso" aria-label={`Abrir ${item.code}`}><ArrowRight size={17} /></Link>
                 {currentUser.role === 'ADMIN' && <button className="icon-button row-delete-button" type="button" title="Eliminar caso" aria-label={`Eliminar ${item.code}`} onClick={() => setConfirmDelete(item)}><Trash2 size={16} /></button>}
               </div>
@@ -124,6 +145,9 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
           ))}
         </section>
       )}
+      <Modal open={Boolean(confirmApproval)} title="Aprobar y finalizar caso" description="Esta decisión humana moverá el expediente fuera de Casos generados." onClose={() => !approving && setConfirmApproval(null)}>
+        {confirmApproval && <div className="case-approval-confirmation"><CheckCircle2 size={30} /><div><p>Confirmas que <strong>{confirmApproval.code}</strong> puede continuar y pasar a Casos finalizados.</p><small>La aprobación quedará registrada con tu usuario y la fecha actual.</small></div><footer><Button variant="ghost" onClick={() => setConfirmApproval(null)}>Cancelar</Button><Button variant="success" icon={<CheckCircle2 size={16} />} loading={approving} onClick={() => void approveCase()}>Sí, apruebo</Button></footer></div>}
+      </Modal>
       <Modal open={Boolean(confirmDelete)} title="Eliminar caso en cascada" description="Esta acción es irreversible y está restringida a administradores." onClose={() => !deleting && setConfirmDelete(null)}>
         {confirmDelete && <div className="cascade-delete"><Trash2 size={28} /><div><p>Se eliminará <strong>{confirmDelete.code}</strong> junto con:</p><ul><li>El registro del correo recibido</li><li>Los {confirmDelete.documentCount} documentos relacionados</li><li>El control documental y el análisis integral</li><li>La carpeta completa del caso en S3</li></ul></div><footer><Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancelar</Button><Button variant="danger" loading={deleting} onClick={() => void deleteCase()}>Eliminar definitivamente</Button></footer></div>}
       </Modal>

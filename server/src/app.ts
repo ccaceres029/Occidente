@@ -91,6 +91,10 @@ interface UserPreferencesBody {
   autoAnalyzeCompleteCases?: unknown;
 }
 
+interface FinalizedCasesExportBody {
+  caseIds?: unknown;
+}
+
 interface CaseParams {
   id: string;
 }
@@ -535,6 +539,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     return user;
   };
 
+  const requireDecisionActor = (request: FastifyRequest): string => {
+    const user = requestUser(request);
+    if (!authEnabled) return user?.displayName || 'Usuario de demostración';
+    if (!user || user.role === 'CONSULTA') {
+      throw new WorkflowError('Tu rol no tiene permiso para aprobar casos.', 403);
+    }
+    return user.displayName;
+  };
+
   const ensureAnotherAdmin = async (targetId: string): Promise<void> => {
     if (!mysqlStore) throw new WorkflowError('La gestión de usuarios requiere la conexión MySQL.', 503);
     const users = await mysqlStore.listUsers();
@@ -730,6 +743,39 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const generatedCase = await mailService.getGeneratedCase(request.params.id, false);
     if (!generatedCase) throw new WorkflowError('No se encontró el caso generado.', 404);
     return { case: generatedCase };
+  });
+
+  app.post<{ Params: CaseParams }>('/api/generated-cases/:id/finalize', async (request) => {
+    const actor = requireDecisionActor(request);
+    if (!mailService) throw new WorkflowError('La aprobación requiere la conexión MySQL.', 503);
+    const generatedCase = await mailService.finalizeGeneratedCase(request.params.id, actor);
+    if (!generatedCase) throw new WorkflowError('No se encontró el caso generado.', 404);
+    return { case: generatedCase };
+  });
+
+  app.get<{ Querystring: { limit?: string } }>('/api/finalized-cases', async (request) => {
+    if (!mailService) throw new WorkflowError('Los casos finalizados requieren la conexión MySQL.', 503);
+    return { items: await mailService.listFinalizedCases(Number(request.query.limit || 250)) };
+  });
+
+  app.post<{ Body: FinalizedCasesExportBody }>('/api/finalized-cases/export', async (request, reply) => {
+    if (!mailService) throw new WorkflowError('La exportación requiere la conexión MySQL.', 503);
+    const caseIds = Array.isArray(request.body?.caseIds)
+      ? request.body.caseIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [];
+    const uniqueIds = [...new Set(caseIds)];
+    if (!uniqueIds.length || uniqueIds.length > 100) {
+      throw new WorkflowError('Selecciona entre 1 y 100 casos finalizados para generar los archivos.', 400);
+    }
+    const result = await mailService.exportFinalizedCases(uniqueIds);
+    if (!result) throw new WorkflowError('Uno o más casos seleccionados no están finalizados.', 409);
+    return reply
+      .header('content-type', 'application/zip')
+      .header('content-length', String(result.archive.length))
+      .header('content-disposition', 'attachment; filename="Casos_Finalizados_AFPC.zip"')
+      .header('cache-control', 'private, no-store')
+      .header('x-exported-cases', String(result.count))
+      .send(result.archive);
   });
 
   app.get<{ Params: GeneratedDocumentParams }>(
