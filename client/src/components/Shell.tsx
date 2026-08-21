@@ -4,9 +4,7 @@ import {
   Bell,
   ArrowRight,
   Archive,
-  ClipboardList,
   Inbox,
-  FilePlus2,
   FolderKanban,
   HelpCircle,
   LayoutDashboard,
@@ -43,7 +41,6 @@ const titles: Array<[RegExp, string, string]> = [
 export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [health, setHealth] = useState<HealthData | null>(null);
-  const [queueTotal, setQueueTotal] = useState<number | null>(null);
   const [alerts, setAlerts] = useState<Array<{ level: string; message: string; count: number }>>([]);
   const [globalSearch, setGlobalSearch] = useState('');
   const [helpOpen, setHelpOpen] = useState(false);
@@ -57,11 +54,8 @@ export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: ()
     let active = true;
     api.health().then((data) => active && setHealth(data)).catch(() => active && setHealth(null));
     api.dashboard().then((data) => {
-      if (active) {
-        setQueueTotal(data.metrics.total);
-        setAlerts(data.alerts);
-      }
-    }).catch(() => active && setQueueTotal(null));
+      if (active) setAlerts(data.alerts);
+    }).catch(() => undefined);
     return () => { active = false; };
   }, []);
 
@@ -115,8 +109,6 @@ export default function Shell({ user, onLogout }: { user: AuthUser; onLogout: ()
 
           <span className="nav-group-label nav-group-label--spaced">Configuración</span>
           <NavLink to="/configuracion/correo"><Mail size={19} /><span>Correo IMAP / SMTP</span></NavLink>
-          <NavLink to="/casos" end><ClipboardList size={19} /><span>Bandeja de casos</span>{queueTotal !== null && <kbd>{queueTotal}</kbd>}</NavLink>
-          <NavLink to="/casos/nuevo"><FilePlus2 size={19} /><span>Nueva afiliación</span></NavLink>
           {user.role === 'ADMIN' && <NavLink to="/configuracion/usuarios"><Users size={19} /><span>Usuarios</span></NavLink>}
         </nav>
 
