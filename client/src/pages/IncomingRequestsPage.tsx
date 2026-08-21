@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrainCircuit, Clock3, Inbox, Mail, Paperclip, RefreshCw, Search, Trash2, UserRoundCog } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
@@ -32,6 +32,7 @@ export default function IncomingRequestsPage({
   const [deleting, setDeleting] = useState(false);
   const [savingPreference, setSavingPreference] = useState<'refresh' | 'analysis' | null>(null);
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(AUTO_REFRESH_SECONDS);
+  const syncInFlight = useRef(false);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -44,6 +45,27 @@ export default function IncomingRequestsPage({
       if (!silent) setLoading(false);
     }
   }, []);
+
+  const sync = useCallback(async (notify = true) => {
+    if (syncInFlight.current) return;
+    syncInFlight.current = true;
+    setSyncing(true);
+    try {
+      const result = await api.syncIncomingRequests();
+      await load(true);
+      if (notify) {
+        const movedNotice = result.movedToTrash ? ` ${result.movedToTrash} correo(s) movido(s) a Papelera en SiteGround.` : '';
+        setToast({ message: (result.generated
+          ? `${result.generated} caso(s) generado(s) con ${result.documents} documento(s).`
+          : result.imported ? `${result.imported} solicitud(es) nueva(s) recibida(s).` : 'La bandeja está al día.') + movedNotice });
+      }
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : 'No fue posible sincronizar el correo.');
+    } finally {
+      syncInFlight.current = false;
+      setSyncing(false);
+    }
+  }, [load]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -59,10 +81,10 @@ export default function IncomingRequestsPage({
       }
       nextRefreshAt = Date.now() + AUTO_REFRESH_SECONDS * 1_000;
       setSecondsUntilRefresh(AUTO_REFRESH_SECONDS);
-      void load(true);
+      void sync(false);
     }, 250);
     return () => window.clearInterval(timer);
-  }, [currentUser.autoRefreshIncoming, load]);
+  }, [currentUser.autoRefreshIncoming, sync]);
 
   const savePreference = async (
     key: 'autoRefreshIncoming' | 'autoAnalyzeCompleteCases',
@@ -84,22 +106,6 @@ export default function IncomingRequestsPage({
       });
     } finally {
       setSavingPreference(null);
-    }
-  };
-
-  const sync = async () => {
-    setSyncing(true);
-    try {
-      const result = await api.syncIncomingRequests();
-      await load();
-      const movedNotice = result.movedToTrash ? ` ${result.movedToTrash} correo(s) movido(s) a Papelera en SiteGround.` : '';
-      setToast({ message: (result.generated
-        ? `${result.generated} caso(s) generado(s) con ${result.documents} documento(s).`
-        : result.imported ? `${result.imported} solicitud(es) nueva(s) recibida(s).` : 'La bandeja está al día.') + movedNotice });
-    } catch (syncError) {
-      setError(syncError instanceof Error ? syncError.message : 'No fue posible sincronizar el correo.');
-    } finally {
-      setSyncing(false);
     }
   };
 
