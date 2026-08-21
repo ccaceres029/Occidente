@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowRight, BrainCircuit, CalendarDays, CheckCircle2, CircleGauge, FileStack, FolderKanban, Mail, Search, Trash2 } from 'lucide-react';
+import { ArrowRight, BrainCircuit, CalendarDays, CheckCircle2, CircleGauge, FileStack, FolderKanban, History, Mail, Search, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
@@ -138,6 +138,7 @@ export default function GeneratedCasesPage({ currentUser }: { currentUser: AuthU
               </Badge>
               <div className="generated-list__actions">
                 {currentUser.role !== 'CONSULTA' && <button className="approve-case-button" type="button" onClick={() => setConfirmApproval(item)}><CheckCircle2 size={15} /> Apruebo</button>}
+                <Link className="audit-case-link" to={`/casos-generados/${item.id}?view=audit`} title="Ver auditoría" aria-label={`Ver auditoría de ${item.code}`}><History size={15} /><span>Auditoría</span></Link>
                 <Link to={`/casos-generados/${item.id}`} title="Abrir caso" aria-label={`Abrir ${item.code}`}><ArrowRight size={17} /></Link>
                 {currentUser.role === 'ADMIN' && <button className="icon-button row-delete-button" type="button" title="Eliminar caso" aria-label={`Eliminar ${item.code}`} onClick={() => setConfirmDelete(item)}><Trash2 size={16} /></button>}
               </div>

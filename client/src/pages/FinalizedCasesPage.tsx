@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Archive, ArrowRight, CheckCircle2, Download, FileSpreadsheet, FileStack, Search } from 'lucide-react';
+import { Archive, ArrowRight, CheckCircle2, Download, FileSpreadsheet, FileStack, History, Search } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../api';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Toast } from '../components/ui';
@@ -120,7 +120,10 @@ export default function FinalizedCasesPage() {
               <div className="generated-list__sender"><strong>{item.finalizedBy || 'Usuario autorizado'}</strong><small>{item.senderName || item.senderEmail || 'Remitente no identificado'}</small></div>
               <time dateTime={item.finalizedAt}>{dateLabel(item.finalizedAt)}</time>
               <Badge tone="neutral"><FileStack size={12} /> {item.documentCount}</Badge>
-              <Link to={`/casos-generados/${item.id}`} title="Abrir caso finalizado" aria-label={`Abrir ${item.code}`}><ArrowRight size={17} /></Link>
+              <div className="finalized-list__actions">
+                <Link className="audit-case-link" to={`/casos-generados/${item.id}?view=audit`} title="Ver auditoría" aria-label={`Ver auditoría de ${item.code}`}><History size={15} /><span>Auditoría</span></Link>
+                <Link to={`/casos-generados/${item.id}`} title="Abrir caso finalizado" aria-label={`Abrir ${item.code}`}><ArrowRight size={17} /></Link>
+              </div>
             </article>
           ))}
         </section>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowLeft, BrainCircuit, Check, CheckCircle2, Download, Eye, File, FileStack, HardDrive, Mail, MailCheck, RefreshCw, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { AlertTriangle, ArrowLeft, Bot, BrainCircuit, Check, CheckCircle2, Clock3, Database, Download, Eye, File, FileStack, Globe2, HardDrive, History, Mail, MailCheck, RefreshCw, ShieldCheck, Sparkles, Trash2, UserRound } from 'lucide-react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import GeneratedCaseIntelligencePanel from '../components/GeneratedCaseIntelligencePanel';
 import { Badge, Button, EmptyState, ErrorState, LoadingState, Modal, Toast } from '../components/ui';
@@ -32,9 +32,24 @@ function orderDocuments(detail: GeneratedCaseDetail): GeneratedCaseDetail {
   };
 }
 
+const auditStatusLabel = {
+  COMPLETED: 'Completado',
+  PENDING: 'En curso',
+  ERROR: 'Incidencia',
+  INFO: 'Informativo',
+} as const;
+
+const auditActorLabel = {
+  PERSON: 'Usuario',
+  SYSTEM: 'Sistema',
+  EXTERNAL: 'Externo',
+  AI: 'IA',
+} as const;
+
 export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: AuthUser }) {
   const { id = '' } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [detail, setDetail] = useState<GeneratedCaseDetail | null>(null);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
@@ -44,7 +59,9 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
   const [deleting, setDeleting] = useState(false);
   const [approving, setApproving] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
-  const [activeView, setActiveView] = useState<'documents' | 'analysis'>('documents');
+  const [activeView, setActiveView] = useState<'documents' | 'analysis' | 'audit'>(
+    searchParams.get('view') === 'audit' ? 'audit' : 'documents',
+  );
   const [toast, setToast] = useState<{ message: string; tone: 'success' | 'danger' } | null>(null);
 
   useEffect(() => {
@@ -56,7 +73,9 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
         const ordered = orderDocuments(generated);
         setDetail(ordered);
         setSelectedId(ordered.documents[0]?.id || '');
-        if (generated.documentAnalysis?.status === 'COMPLETE' || generated.intelligenceStatus?.status === 'ERROR') setActiveView('analysis');
+        if (generated.documentAnalysis?.status === 'COMPLETE' || generated.intelligenceStatus?.status === 'ERROR') {
+          setActiveView((current) => current === 'audit' ? current : 'analysis');
+        }
       })
       .catch((loadError) => active && setError(loadError instanceof Error ? loadError.message : 'No fue posible cargar el caso.'))
       .finally(() => active && setLoading(false));
@@ -68,7 +87,9 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
     const timer = window.setInterval(() => {
       api.generatedCase(id).then(({ case: generated }) => {
         setDetail(orderDocuments(generated));
-        if (generated.documentIntelligence || generated.intelligenceStatus?.status === 'ERROR') setActiveView('analysis');
+        if (generated.documentIntelligence || generated.intelligenceStatus?.status === 'ERROR') {
+          setActiveView((current) => current === 'audit' ? current : 'analysis');
+        }
       }).catch(() => undefined);
     }, 3_500);
     return () => window.clearInterval(timer);
@@ -200,6 +221,7 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
       <nav className="generated-case-tabs" aria-label="Contenido del caso">
         <button type="button" className={activeView === 'documents' ? 'is-active' : ''} onClick={() => setActiveView('documents')}><FileStack size={16} /> Documentos <span>{detail.documents.length}</span></button>
         <button type="button" className={activeView === 'analysis' ? 'is-active' : ''} onClick={() => setActiveView('analysis')}><BrainCircuit size={16} /> Análisis integral {detail.documentIntelligence && <CheckCircle2 size={14} />}</button>
+        <button type="button" className={activeView === 'audit' ? 'is-active' : ''} onClick={() => setActiveView('audit')}><History size={16} /> Auditoría <span>{detail.auditTrail.length}</span></button>
       </nav>
 
       {activeView === 'documents' && (detail.documents.length ? (
@@ -226,6 +248,40 @@ export default function GeneratedCaseDetailPage({ currentUser }: { currentUser: 
       ) : <EmptyState icon={<FileStack size={26} />} title="Caso sin documentos adjuntos" body="El correo fue codificado correctamente, pero no contenía archivos adjuntos." />)}
 
       {activeView === 'analysis' && <GeneratedCaseIntelligencePanel detail={detail} analyzing={analyzing} onAnalyze={() => void analyzeCase()} />}
+
+      {activeView === 'audit' && (
+        <section className="generated-audit-panel" aria-label={`Auditoría de ${detail.code}`}>
+          <header>
+            <div><History size={22} /><span><small>Trazabilidad integral</small><h3>Historial de auditoría del caso</h3><p>Registro cronológico desde la recepción del correo hasta la etapa actual.</p></span></div>
+            <Badge tone="neutral">{detail.auditTrail.length} eventos</Badge>
+          </header>
+          <div className="generated-audit-summary">
+            <div><Clock3 size={18} /><span><small>Inicio del expediente</small><strong>{dateLabel(detail.auditTrail[0]?.createdAt || detail.receivedAt)}</strong></span></div>
+            <div><UserRound size={18} /><span><small>Responsable actual</small><strong>{detail.finalizedBy || 'Automatización operativa'}</strong></span></div>
+            <div><Database size={18} /><span><small>Evidencias vinculadas</small><strong>{detail.documents.length} documentos</strong></span></div>
+          </div>
+          <div className="audit-timeline generated-audit-timeline">
+            {detail.auditTrail.map((event, index) => (
+              <article key={event.id}>
+                <div className={`audit-timeline__rail is-${event.actorType.toLocaleLowerCase('en-US')}`}>
+                  <span>{event.actorType === 'PERSON' ? <UserRound size={15} /> : event.actorType === 'EXTERNAL' ? <Globe2 size={15} /> : event.actorType === 'AI' ? <Bot size={15} /> : <Database size={15} />}</span>
+                  {index < detail.auditTrail.length - 1 && <i />}
+                </div>
+                <div className="audit-timeline__content">
+                  <header><strong>{event.label}</strong><time dateTime={event.createdAt}>{dateLabel(event.createdAt)}</time></header>
+                  <p>{event.detail}</p>
+                  <footer>
+                    <span className="avatar avatar--small">{event.actor.slice(0, 1).toUpperCase()}</span>
+                    <strong>{event.actor}</strong>
+                    <Badge tone="neutral">{auditActorLabel[event.actorType]}</Badge>
+                    <Badge tone={event.status === 'ERROR' ? 'danger' : event.status === 'PENDING' ? 'warning' : event.status === 'COMPLETED' ? 'success' : 'neutral'}>{auditStatusLabel[event.status]}</Badge>
+                  </footer>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
       <Modal open={confirmApproval} title="Aprobar y finalizar caso" description="Esta decisión humana moverá el expediente a Casos finalizados." onClose={() => !approving && setConfirmApproval(false)}>
         <div className="case-approval-confirmation"><CheckCircle2 size={30} /><div><p>Confirmas que <strong>{detail.code}</strong> puede continuar.</p><small>La aprobación quedará registrada con tu usuario y la fecha actual.</small></div><footer><Button variant="ghost" onClick={() => setConfirmApproval(false)}>Cancelar</Button><Button variant="success" icon={<CheckCircle2 size={16} />} loading={approving} onClick={() => void approveCase()}>Sí, apruebo</Button></footer></div>

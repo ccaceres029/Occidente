@@ -125,6 +125,7 @@ export interface GeneratedCaseSummary {
 export interface GeneratedCaseDetail extends GeneratedCaseSummary {
   incomingRequestId: string;
   documents: GeneratedCaseDocument[];
+  auditTrail: GeneratedCaseAuditEvent[];
   missingDocumentRequest?: {
     status: 'PENDING' | 'SENT' | 'ERROR';
     subject: string;
@@ -139,6 +140,17 @@ export interface GeneratedCaseDetail extends GeneratedCaseSummary {
     analyzedAt?: string;
     error?: string;
   };
+}
+
+export interface GeneratedCaseAuditEvent {
+  id: string;
+  type: string;
+  label: string;
+  detail: string;
+  actor: string;
+  actorType: 'PERSON' | 'SYSTEM' | 'EXTERNAL' | 'AI';
+  status: 'COMPLETED' | 'PENDING' | 'ERROR' | 'INFO';
+  createdAt: string;
 }
 
 export interface ClientData {

@@ -21,6 +21,7 @@ import {
   generatedCaseIntelligenceFingerprint,
 } from './generatedCaseIntelligence.js';
 import { buildFinalizedCasesArchive } from './finalizedCaseExports.js';
+import { buildGeneratedCaseAuditTrail, type GeneratedCaseAuditEvent } from './generatedCaseAudit.js';
 import { ObjectStorage } from './objectStorage.js';
 import { applyVerifiedBufferedPdfEvidence } from './pdfEvidenceLocator.js';
 import type { DocumentIntelligenceInsight, RiskAssessment } from './types.js';
@@ -103,6 +104,7 @@ export interface GeneratedCaseSummary {
 export interface GeneratedCaseDetail extends GeneratedCaseSummary {
   incomingRequestId: string;
   documents: GeneratedCaseDocument[];
+  auditTrail: GeneratedCaseAuditEvent[];
   missingDocumentRequest?: MissingDocumentRequestStatus;
   documentIntelligence?: DocumentIntelligenceInsight;
   intelligenceStatus?: GeneratedIntelligenceStatus;
@@ -224,6 +226,7 @@ interface GeneratedCaseRow extends RowDataPacket {
   intelligence_result: DocumentIntelligenceInsight | string | null;
   intelligence_error: string | null;
   intelligence_analyzed_at: Date | null;
+  intelligence_updated_at: Date | null;
   risk_level: RiskAssessment['level'] | null;
   risk_score: number | null;
   risk_route: RiskAssessment['route'] | null;
@@ -285,6 +288,23 @@ interface MailEventRow extends RowDataPacket {
   counterparty_email: string | null;
   sent_at: Date | null;
   error_message: string | null;
+}
+
+interface AuditMailEventRow extends RowDataPacket {
+  id: string;
+  direction: string;
+  event_type: string;
+  subject: string;
+  counterparty_email: string | null;
+  status: string;
+  error_message: string | null;
+  created_at: Date;
+  sent_at: Date | null;
+  updated_at: Date;
+}
+
+interface IncomingAuditSourceRow extends RowDataPacket {
+  source_moved_at: Date | null;
 }
 
 interface StoredIntelligenceRow extends RowDataPacket {
@@ -650,6 +670,7 @@ export class MailService {
         intelligence.engine_version AS intelligence_engine_version,
         NULL AS intelligence_result, intelligence.error_message AS intelligence_error,
         intelligence.analyzed_at AS intelligence_analyzed_at,
+        intelligence.updated_at AS intelligence_updated_at,
         intelligence.risk_level, intelligence.risk_score, intelligence.risk_route
        FROM generated_cases gc
        LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
@@ -815,6 +836,7 @@ export class MailService {
         intelligence.engine_version AS intelligence_engine_version,
         intelligence.result_json AS intelligence_result, intelligence.error_message AS intelligence_error,
         intelligence.analyzed_at AS intelligence_analyzed_at,
+        intelligence.updated_at AS intelligence_updated_at,
         intelligence.risk_level, intelligence.risk_score, intelligence.risk_route
        FROM generated_cases gc
        LEFT JOIN generated_case_document_analyses analysis ON analysis.case_id=gc.id
@@ -856,13 +878,64 @@ export class MailService {
       [id],
     );
     const latestRequest = mailRows[0];
+    const [[sourceRows], [auditMailRows]] = await Promise.all([
+      this.pool.query<IncomingAuditSourceRow[]>(
+        'SELECT source_moved_at FROM incoming_requests WHERE id=? LIMIT 1',
+        [row.incoming_request_id],
+      ),
+      this.pool.query<AuditMailEventRow[]>(
+        `SELECT id, direction, event_type, subject, counterparty_email, status,
+          error_message, created_at, sent_at, updated_at
+         FROM generated_case_mail_events WHERE case_id=? ORDER BY created_at, id`,
+        [id],
+      ),
+    ]);
     const intelligence = parseIntelligence(row.intelligence_result);
     if (intelligence) intelligence.analysis.cached = true;
     if (generatedCase.risk && intelligence) generatedCase.risk.reasons = intelligence.recommendation.rationale;
+    const documents = documentRows.map(publicGeneratedDocument);
+    const auditTrail = buildGeneratedCaseAuditTrail({
+      id: generatedCase.id,
+      code: generatedCase.code,
+      subject: generatedCase.subject,
+      ...(generatedCase.senderName ? { senderName: generatedCase.senderName } : {}),
+      ...(generatedCase.senderEmail ? { senderEmail: generatedCase.senderEmail } : {}),
+      receivedAt: generatedCase.receivedAt,
+      createdAt: generatedCase.createdAt,
+      ...(sourceRows[0]?.source_moved_at ? { sourceMovedAt: sourceRows[0].source_moved_at.toISOString() } : {}),
+      documents,
+      ...(generatedCase.documentAnalysis ? { documentAnalysis: generatedCase.documentAnalysis } : {}),
+      ...(row.intelligence_status ? {
+        intelligence: {
+          status: row.intelligence_status,
+          ...(row.intelligence_model ? { model: row.intelligence_model } : {}),
+          ...(row.intelligence_analyzed_at ? { analyzedAt: row.intelligence_analyzed_at.toISOString() } : {}),
+          ...(row.intelligence_updated_at ? { updatedAt: row.intelligence_updated_at.toISOString() } : {}),
+          ...(row.intelligence_error ? { error: row.intelligence_error } : {}),
+          ...(row.risk_level ? { riskLevel: row.risk_level } : {}),
+          ...(row.risk_score !== null ? { riskScore: Number(row.risk_score) } : {}),
+        },
+      } : {}),
+      mailEvents: auditMailRows.map((event) => ({
+        id: event.id,
+        direction: event.direction,
+        eventType: event.event_type,
+        subject: event.subject,
+        ...(event.counterparty_email ? { counterpartyEmail: event.counterparty_email } : {}),
+        status: event.status,
+        ...(event.error_message ? { error: event.error_message } : {}),
+        createdAt: event.created_at.toISOString(),
+        ...(event.sent_at ? { sentAt: event.sent_at.toISOString() } : {}),
+        updatedAt: event.updated_at.toISOString(),
+      })),
+      ...(generatedCase.finalizedAt ? { finalizedAt: generatedCase.finalizedAt } : {}),
+      ...(generatedCase.finalizedBy ? { finalizedBy: generatedCase.finalizedBy } : {}),
+    });
     return {
       ...generatedCase,
       incomingRequestId: row.incoming_request_id,
-      documents: documentRows.map(publicGeneratedDocument),
+      documents,
+      auditTrail,
       ...(latestRequest ? { missingDocumentRequest: this.publicMissingDocumentRequest(latestRequest) } : {}),
       ...(intelligence ? { documentIntelligence: intelligence } : {}),
       ...(row.intelligence_status ? {
