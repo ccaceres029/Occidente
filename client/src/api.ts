@@ -149,7 +149,7 @@ export const api = {
   action: (id: string, action: string, note?: string) =>
     request<ActionResponse>(`/cases/${id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action, actor: 'Cinthia M. · Usuario B', role: 'AFILIACIONES', note }),
+      body: JSON.stringify({ action, note }),
     }),
   revalidate: (id: string) =>
     request<ValidationResponse>(`/cases/${id}/revalidate`, { method: 'POST' }),

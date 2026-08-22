@@ -15,6 +15,7 @@ import {
 import { summarizeCase } from './ai.js';
 import {
   resolveBootstrapUser,
+  resolveCorsOriginConfig,
   resolveDatabaseConfig,
   resolveGeminiConfig,
   resolveMailRuntimeConfig,
@@ -487,7 +488,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   await app.register(cookie);
   await app.register(cors, {
-    origin: true,
+    origin: resolveCorsOriginConfig(),
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   });
@@ -546,6 +547,21 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       throw new WorkflowError('Tu rol no tiene permiso para aprobar casos.', 403);
     }
     return user.displayName;
+  };
+
+  const caseActionContext = (request: FastifyRequest, body: ActionBody) => {
+    const user = requestUser(request);
+    if (authEnabled) {
+      if (!user) throw new WorkflowError('La sesión no permite ejecutar acciones sobre expedientes.', 401);
+      if (user.role === 'CONSULTA') {
+        throw new WorkflowError('Tu rol no tiene permiso para ejecutar acciones sobre expedientes.', 403);
+      }
+      return { actor: user.displayName, role: user.role };
+    }
+    return {
+      actor: textOr(body?.actor, 'Usuario Demo'),
+      role: typeof body?.role === 'string' ? body.role.trim() : undefined,
+    };
   };
 
   const ensureAnotherAdmin = async (targetId: string): Promise<void> => {
@@ -1017,9 +1033,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     async (request) => {
       const current = ensureCase(store, request.params.id);
       const action = normalizeAction(request.body?.action);
-      const actor = textOr(request.body?.actor, 'Usuario Demo');
       const note = typeof request.body?.note === 'string' ? request.body.note.trim() : undefined;
-      const role = typeof request.body?.role === 'string' ? request.body.role.trim() : undefined;
+      const { actor, role } = caseActionContext(request, request.body ?? {});
       const transition = transitionCase(current, action, { role, note });
       const auditEvent = await store.saveCaseAndAudit(transition.afpcCase, {
         caseId: current.id,
@@ -1395,7 +1410,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     return { case: detail(store, updated), document };
   });
 
-  app.post('/api/demo/reset', async () => {
+  app.post('/api/demo/reset', async (request) => {
+    if (authEnabled) requireAdmin(request);
     await store.reset();
     await documentPreviewCache.clear();
     pdfEvidenceLocator.clear();

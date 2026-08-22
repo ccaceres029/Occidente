@@ -59,6 +59,8 @@ export interface ObjectStorageConfig {
   prefix: string;
 }
 
+export type CorsOriginConfig = true | string[];
+
 function combinedEnvironment(): Record<string, string | undefined> {
   const configuredPath = process.env.MACAOIT_SECRETS_PATH?.trim() || CENTRAL_MACAOIT_ENV;
   return { ...parseEnvFile(configuredPath), ...process.env };
@@ -123,6 +125,17 @@ export function resolveObjectStorageConfig(): ObjectStorageConfig | undefined {
     region: env.AWS_REGION?.trim() || env.AWS_DEFAULT_REGION?.trim() || 'us-east-2',
     prefix,
   };
+}
+
+export function resolveCorsOriginConfig(): CorsOriginConfig {
+  const env = combinedEnvironment();
+  const configured = (env.OCCIDENTE_ALLOWED_ORIGINS || env.CORS_ALLOWED_ORIGINS)
+    ?.split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  if (configured?.length) return configured;
+  if (process.env.NODE_ENV === 'production') return ['https://occidente.appsmacao.biz'];
+  return true;
 }
 
 export function resolveGeminiConfig(): GeminiConfig {
