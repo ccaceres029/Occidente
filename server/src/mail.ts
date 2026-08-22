@@ -957,7 +957,7 @@ export class MailService {
     if (!force) {
       const stored = await this.storedDocumentAnalysis(id);
       if (stored?.version === DOCUMENT_COMPLETENESS_VERSION) {
-        if (shouldRunAutomaticAnalysis(autoAnalyzeComplete, stored)) {
+        if (await this.shouldRunAutomaticAnalysis(autoAnalyzeComplete, stored)) {
           void this.ensureGeneratedCaseIntelligence(id, false).catch(() => undefined);
         }
         return stored;
@@ -1022,12 +1022,25 @@ export class MailService {
     } finally {
       connection.release();
     }
-    if (shouldRunAutomaticAnalysis(autoAnalyzeComplete, analysis)) {
+    if (await this.shouldRunAutomaticAnalysis(autoAnalyzeComplete, analysis)) {
       void this.ensureGeneratedCaseIntelligence(id, force).catch(() => undefined);
     } else if (analysis.status !== 'COMPLETE') {
       await this.pool.query('DELETE FROM generated_case_intelligence WHERE case_id=?', [id]);
     }
     return analysis;
+  }
+
+  private async shouldRunAutomaticAnalysis(
+    autoAnalyzeComplete: boolean,
+    analysis?: Pick<DocumentCompletenessAnalysis, 'status' | 'completenessPercent'>,
+  ): Promise<boolean> {
+    if (shouldRunAutomaticAnalysis(autoAnalyzeComplete, analysis)) return true;
+    if (!shouldRunAutomaticAnalysis(true, analysis)) return false;
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT id FROM users
+       WHERE active=TRUE AND auto_analyze_complete_cases=TRUE LIMIT 1`,
+    );
+    return Boolean(rows[0]);
   }
 
   async analyzeGeneratedCaseIntelligence(id: string, force = true): Promise<void> {

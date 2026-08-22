@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { buildMailOperationalDashboard, findTrashMailboxPath, shouldRunAutomaticAnalysis } from '../src/mail.js';
+import { DOCUMENT_COMPLETENESS_VERSION } from '../src/documentCompleteness.js';
+import { buildMailOperationalDashboard, findTrashMailboxPath, MailService, shouldRunAutomaticAnalysis } from '../src/mail.js';
 
 describe('resumen operativo desde recepción de correo', () => {
   test('consolida solicitudes, casos, documentos y etapas reales', () => {
@@ -49,5 +50,46 @@ describe('análisis automático por perfil', () => {
     assert.equal(shouldRunAutomaticAnalysis(false, { status: 'COMPLETE', completenessPercent: 100 }), false);
     assert.equal(shouldRunAutomaticAnalysis(true, { status: 'MISSING_DOCUMENTS', completenessPercent: 99 }), false);
     assert.equal(shouldRunAutomaticAnalysis(true, { status: 'COMPLETE', completenessPercent: 100 }), true);
+  });
+
+  test('arranca el análisis integral cuando la matriz almacenada llega a 100% y existe una preferencia global activa', async () => {
+    const calls: string[] = [];
+    const pool = {
+      async query(sql: string) {
+        calls.push(sql);
+        if (sql.includes('FROM generated_case_document_analyses')) {
+          return [[{
+            status: 'COMPLETE',
+            provider: 'local',
+            gemini_configured: false,
+            completeness_percent: 100,
+            expected_count: 10,
+            received_count: 10,
+            missing_count: 0,
+            unclassified_count: 0,
+            summary: 'Paquete completo.',
+            model: null,
+            analysis_version: DOCUMENT_COMPLETENESS_VERSION,
+            analyzed_at: new Date('2026-08-22T01:00:00Z'),
+          }], []];
+        }
+        if (sql.includes('FROM generated_case_document_analysis_items')) return [[], []];
+        if (sql.includes('auto_analyze_complete_cases=TRUE')) return [[{ id: 'user-admin' }], []];
+        throw new Error(`Consulta inesperada: ${sql}`);
+      },
+    };
+    const service = new MailService(pool as never);
+    let started = false;
+    Object.defineProperty(service, 'ensureGeneratedCaseIntelligence', {
+      value: async (id: string, force: boolean) => {
+        started = id === 'case-ready' && force === false;
+      },
+    });
+
+    const analysis = await service.analyzeGeneratedCase('case-ready', false, false);
+
+    assert.equal(analysis?.completenessPercent, 100);
+    assert.equal(started, true);
+    assert.ok(calls.some((sql) => sql.includes('auto_analyze_complete_cases=TRUE')));
   });
 });
