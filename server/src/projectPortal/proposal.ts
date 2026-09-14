@@ -1,11 +1,6 @@
 // Base documental: Propuesta_Motor_Analisis_Portal_APEX_Occidente_v2.0.docx
 export const proposal = {
   "version": "2.0",
-  "amount": 170000,
-  "tax": 25500,
-  "total": 195500,
-  "payment": 85000,
-  "paymentTotal": 97750,
   "model": "Gemini 3.5 Flash-Lite",
   "modelId": "gemini-3.5-flash-lite",
   "responsibilities": [
