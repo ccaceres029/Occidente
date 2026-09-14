@@ -21,14 +21,46 @@ export interface Project {
 }
 export class PortalError extends Error { constructor(message: string, public statusCode = 400) { super(message); } }
 export const sprintDefinitions = [
-  ['Proceso y alcance', 'Proceso, matriz documental, reglas y arquitectura.', 'Afiliaciones, Cumplimiento y TI confirman alcance, responsables y criterios.'],
-  ['AWS, usuarios y permisos', 'Lightsail, RDS MySQL, S3 privado, autenticación y roles.', 'TI comprueba accesos y restricciones de los usuarios internos y externos.'],
-  ['Recepción y notificaciones', 'Formularios digitales, IMAP, SMTP y creación trazable de casos.', 'Operaciones registra solicitudes por ambos canales y verifica mensajes y adjuntos.'],
-  ['Documentos y carga QR', 'Carga móvil segura, completitud y subsanación documental.', 'Los documentos quedan asociados al caso correcto y se actualizan los faltantes.'],
-  ['Análisis asistido y evidencia', 'Clasificación, extracción, reglas, reanálisis y alertas.', 'Cumplimiento contrasta resultados con casos de referencia. La aprobación es humana.'],
-  ['Decisión y exportación', 'Decisión humana, escalamiento, auditoría y archivos de salida.', 'AFP recorre un expediente hasta el cierre y verifica la exportación acordada.'],
-  ['Pruebas integrales y manual', 'Pruebas funcionales, seguridad, rendimiento y manual de usuario.', 'Usuarios clave ejecutan la matriz de aceptación y registran observaciones.'],
-  ['Capacitación y entrega', 'Correcciones, capacitación, despliegue y paquete operativo.', 'AFP recibe la versión y documentación. La aceptación contractual se registra aparte.'],
+  [
+    "Alcance y arquitectura APEX",
+    "Matriz de reglas, diseño del portal, contrato API y criterios UAT. Banco: confirmar versiones, muestras, servicios y responsables.",
+    "Ambos equipos aprueban alcance, contrato de datos, reglas, infraestructura y escenarios de aceptación."
+  ],
+  [
+    "Portal y primer intercambio",
+    "Ambiente del banco, acceso al portal, configuración y primer intercambio con APEX. Banco: habilitar base, documentos y Gemini.",
+    "Acceso y permisos verificados; APEX envía un expediente de prueba al motor."
+  ],
+  [
+    "Extracción y administración",
+    "Clasificación y extracción; pantallas para matrices documentales y reglas. Banco: validar muestras y presentar resultados.",
+    "Se contrastan campos y faltantes con documentos de referencia; administradores editan las configuraciones soportadas."
+  ],
+  [
+    "Reglas y publicación",
+    "Consistencia, evidencia, versionado, publicación y auditoría desde el portal. Banco: validar reglas y resultados en APEX.",
+    "Una regla se prueba y publica; el análisis nuevo la aplica y el anterior conserva su versión."
+  ],
+  [
+    "Integración completa",
+    "Recorrido APEX–motor, errores, duplicados, recuperación y reprocesos. IT completa su extremo.",
+    "El resultado corresponde a la versión correcta; errores y reintentos no provocan aprobación implícita ni duplicados."
+  ],
+  [
+    "Piloto integrado",
+    "Versión candidata con motor, portal administrativo y APEX. Participación de IT y usuarios clave.",
+    "Piloto controlado de extremo a extremo; se registran observaciones. No sustituye la aceptación final."
+  ],
+  [
+    "UAT y ajustes",
+    "Pruebas integrales, seguridad, rendimiento acordado, correcciones y manuales. Banco: ejecutar UAT.",
+    "Usuarios clave validan criterios de aceptación y ambos equipos corrigen sus componentes."
+  ],
+  [
+    "Despliegue y entrega",
+    "Correcciones finales, capacitación, despliegue en el banco y transferencia operativa.",
+    "AFP recibe versión, documentación y evidencias de operación y recuperación; aceptación contractual separada."
+  ]
 ] as const;
 export const demoMembers: Member[] = [
   { id: 'demo-admin', username: 'demo-admin', name: 'Coordinación MACAO · Demo', role: 'ADMIN', active: true },
@@ -38,7 +70,7 @@ export const demoMembers: Member[] = [
 ];
 export function seedProject(): Project {
   const now = new Date().toISOString();
-  return { schema: 1, name: 'Mesa de Control de Afiliaciones', settingsVersion: 1, startDate: null, morazanicaPause: true,
+  return { schema: 1, name: 'Motor de análisis y portal administrativo', settingsVersion: 1, startDate: null, morazanicaPause: true,
     members: [], comments: [], events: [], sessions: [],
     tasks: sprintDefinitions.map(([title, description, acceptance], i) => ({ id: `entrega-${i + 1}`, title, description, acceptance,
       sprint: i + 1, status: 'PENDIENTE', assigneeId: null, priority: 'MEDIA', kind: 'ENTREGABLE', dueDate: null,

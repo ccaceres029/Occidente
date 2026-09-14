@@ -4,6 +4,7 @@ import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ProjectStore } from './store.js';
+import { proposal } from './proposal.js';
 import { demoMembers, event, PortalError, ROLES, STATUSES, sprintDefinitions, taskFields, text, date, type Member, type Project, type Role, type Status, type Task } from './model.js';
 
 const safeMember = ({ salt: _salt, hash: _hash, ...m }: Member) => m;
@@ -70,8 +71,8 @@ export async function buildProjectPortal(options: { store: ProjectStore; demo?: 
     return task;
   };
   app.get('/api/portal/session', async request => {
-    try { return { user: safeMember(await actor(request)), demo, version: '0.1.0' }; }
-    catch { return { user: null, demo, version: '0.1.0' }; }
+    try { return { user: safeMember(await actor(request)), demo, version: '0.2.0' }; }
+    catch { return { user: null, demo, version: '0.2.0' }; }
   });
   const attempts = new Map<string, { count: number; until: number }>();
   app.post('/api/portal/login', async (request, reply) => {
@@ -104,7 +105,7 @@ export async function buildProjectPortal(options: { store: ProjectStore; demo?: 
     const user = await actor(request), p = await store.read();
     return { project: { name: p.name, startDate: p.startDate, morazanicaPause: p.morazanicaPause, virtualDay: p.virtualDay ?? 2, settingsVersion: p.settingsVersion },
       tasks: p.tasks, members: p.members.map(safeMember), comments: p.comments, events: p.events.slice(-500).reverse(),
-      sprints: sprintDefinitions, user: safeMember(user), demo };
+      sprints: sprintDefinitions, proposal, user: safeMember(user), demo };
   });
   app.post('/api/portal/tasks', async request => {
     const user = await actor(request), b = body(request);
@@ -237,7 +238,7 @@ export async function buildProjectPortal(options: { store: ProjectStore; demo?: 
   const files: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'],
     '/portal.js': ['portal.js', 'application/javascript; charset=utf-8'], '/portal.css': ['portal.css', 'text/css; charset=utf-8'],
-    '/calendar.js': ['calendar.js', 'application/javascript; charset=utf-8'], '/logo.png': ['logo.png', 'image/png'],
+    '/calendar.js': ['calendar.js', 'application/javascript; charset=utf-8'], '/logo.png': ['logo.png', 'image/png'], '/occidente.png': ['occidente.png', 'image/png'],
   };
   for (const [url, [filename, contentType]] of Object.entries(files)) app.get(url, async (_request, reply) => reply.type(contentType).send(await readFile(path.join(staticDir, filename))));
   app.get('/favicon.ico', (_request, reply) => reply.code(204).send());

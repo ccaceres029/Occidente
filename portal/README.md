@@ -1,6 +1,6 @@
 # Portal de seguimiento de AFP Occidente
 
-Primera versión funcional 0.1.0 para controlar el proyecto con ocho sprints. Aplicación independiente del portal de afiliaciones: no utiliza sus usuarios, cookies, tablas, correo, IA, S3 ni configuración de secretos. No contiene campos monetarios.
+Versión funcional 0.2.0 para controlar el proyecto con ocho sprints. Aplicación independiente del portal de afiliaciones: no utiliza sus usuarios, cookies, tablas, correo, IA, S3 ni configuración de secretos. Incluye la referencia económica de la propuesta v2.0; no registra pagos.
 
 ## Propuesta de funcionamiento
 
@@ -97,3 +97,9 @@ pnpm test
 ```
 
 Las pruebas de API usan archivos temporales aislados, incluyendo autenticación real y permisos sin conectar MySQL. Las pruebas del calendario cubren pausa, capacidad reducida, límites de fecha e inicio relativo. Las comprobaciones del adaptador MySQL no sustituyen una prueba de integración en una base de ensayo.
+
+## Propuesta v2.0
+
+El portal muestra ahora el motor de análisis y el portal administrativo de MACAO, la integración con APEX y la infraestructura del banco. Las vistas Propuesta y alcance, Responsabilidades e Infraestructura y Gemini recogen la propuesta por L 170,000 más ISV, el modelo `gemini-3.5-flash-lite` y la responsabilidad del banco ante su deprecación. Los importes son condiciones comerciales compartidas, no un registro de pagos.
+
+Los nuevos proyectos nacen con el plan actualizado de ocho sprints, piloto en S6 y entrega en S8. La actualización de código no sobrescribe tareas existentes: estas se revisan y actualizan mediante la API normal, conservando estados, responsables, fechas e historial. El proyecto local sin avances fue ajustado de esa manera. Las pantallas no implican aceptación comercial ni despliegue productivo.
