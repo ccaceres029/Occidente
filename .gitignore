@@ -11,3 +11,5 @@ server/data/demo-db.json
 output/
 tmp/
 coverage/
+server/data/project-portal-demo.json
+.playwright-cli/

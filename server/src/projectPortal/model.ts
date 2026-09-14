@@ -1,0 +1,93 @@
+import { randomUUID } from 'node:crypto';
+
+export const ROLES = ['ADMIN', 'MACAO', 'AFP', 'CONSULTA'] as const;
+export type Role = typeof ROLES[number];
+export const STATUSES = ['PENDIENTE', 'EN_DESARROLLO', 'PRUEBAS_MACAO', 'VALIDACION_AFP', 'ACEPTADO'] as const;
+export type Status = typeof STATUSES[number];
+export interface Member { id: string; name: string; username: string; role: Role; active: boolean; salt?: string; hash?: string }
+export interface Task {
+  id: string; title: string; description: string; acceptance: string; sprint: number;
+  status: Status; assigneeId: string | null; priority: 'ALTA' | 'MEDIA' | 'BAJA';
+  kind: 'ENTREGABLE' | 'TAREA' | 'SOLICITUD'; dueDate: string | null;
+  blocked: string; dependencies: string[]; evidence: string; archived: boolean;
+  version: number; createdAt: string; updatedAt: string;
+}
+export interface Event { id: string; taskId: string | null; actorId: string; actorName: string; action: string; detail: string; at: string }
+export interface Comment { id: string; taskId: string; actorId: string; actorName: string; text: string; at: string }
+export interface Project {
+  schema: 1; name: string; settingsVersion: number; startDate: string | null; morazanicaPause: boolean; virtualDay?: number;
+  tasks: Task[]; members: Member[]; comments: Comment[]; events: Event[];
+  sessions: { hash: string; memberId: string; expires: number }[];
+}
+export class PortalError extends Error { constructor(message: string, public statusCode = 400) { super(message); } }
+export const sprintDefinitions = [
+  ['Proceso y alcance', 'Proceso, matriz documental, reglas y arquitectura.', 'Afiliaciones, Cumplimiento y TI confirman alcance, responsables y criterios.'],
+  ['AWS, usuarios y permisos', 'Lightsail, RDS MySQL, S3 privado, autenticación y roles.', 'TI comprueba accesos y restricciones de los usuarios internos y externos.'],
+  ['Recepción y notificaciones', 'Formularios digitales, IMAP, SMTP y creación trazable de casos.', 'Operaciones registra solicitudes por ambos canales y verifica mensajes y adjuntos.'],
+  ['Documentos y carga QR', 'Carga móvil segura, completitud y subsanación documental.', 'Los documentos quedan asociados al caso correcto y se actualizan los faltantes.'],
+  ['Análisis asistido y evidencia', 'Clasificación, extracción, reglas, reanálisis y alertas.', 'Cumplimiento contrasta resultados con casos de referencia. La aprobación es humana.'],
+  ['Decisión y exportación', 'Decisión humana, escalamiento, auditoría y archivos de salida.', 'AFP recorre un expediente hasta el cierre y verifica la exportación acordada.'],
+  ['Pruebas integrales y manual', 'Pruebas funcionales, seguridad, rendimiento y manual de usuario.', 'Usuarios clave ejecutan la matriz de aceptación y registran observaciones.'],
+  ['Capacitación y entrega', 'Correcciones, capacitación, despliegue y paquete operativo.', 'AFP recibe la versión y documentación. La aceptación contractual se registra aparte.'],
+] as const;
+export const demoMembers: Member[] = [
+  { id: 'demo-admin', username: 'demo-admin', name: 'Coordinación MACAO · Demo', role: 'ADMIN', active: true },
+  { id: 'demo-macao', username: 'demo-macao', name: 'Equipo MACAO · Demo', role: 'MACAO', active: true },
+  { id: 'demo-afp', username: 'demo-afp', name: 'Validador AFP · Demo', role: 'AFP', active: true },
+  { id: 'demo-viewer', username: 'demo-viewer', name: 'Consulta AFP · Demo', role: 'CONSULTA', active: true },
+];
+export function seedProject(): Project {
+  const now = new Date().toISOString();
+  return { schema: 1, name: 'Mesa de Control de Afiliaciones', settingsVersion: 1, startDate: null, morazanicaPause: true,
+    members: [], comments: [], events: [], sessions: [],
+    tasks: sprintDefinitions.map(([title, description, acceptance], i) => ({ id: `entrega-${i + 1}`, title, description, acceptance,
+      sprint: i + 1, status: 'PENDIENTE', assigneeId: null, priority: 'MEDIA', kind: 'ENTREGABLE', dueDate: null,
+      blocked: '', dependencies: [], evidence: '', archived: false, version: 1, createdAt: now, updatedAt: now })),
+  };
+}
+export function event(p: Project, actor: Member, action: string, detail: string, taskId: string | null = null) {
+  p.events.push({ id: randomUUID(), taskId, actorId: actor.id, actorName: actor.name, action, detail, at: new Date().toISOString() });
+}
+export function text(value: unknown, name: string, max: number, required = false): string {
+  if (typeof value !== 'string' || value.length > max || (required && !value.trim())) throw new PortalError(`${name}: texto ${required ? 'obligatorio, ' : ''}máximo ${max} caracteres.`);
+  return value.trim();
+}
+export function date(value: unknown): string | null {
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string' || !/^20\d{2}-\d{2}-\d{2}$/.test(value)) throw new PortalError('Fecha inválida.');
+  const d = new Date(value + 'T12:00:00Z');
+  if (!Number.isFinite(d.getTime()) || d.toISOString().slice(0, 10) !== value) throw new PortalError('Fecha inválida.');
+  return value;
+}
+export function evidenceUrl(value: unknown): string {
+  const url = text(value, 'Evidencia', 2000);
+  if (!url) return '';
+  try { const parsed = new URL(url); if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error(); }
+  catch { throw new PortalError('La evidencia debe ser un enlace HTTP o HTTPS sin credenciales.'); }
+  return url;
+}
+export function taskFields(body: Record<string, unknown>, p: Project, current?: Task): Task {
+  const source = { ...current, ...body };
+  const title = text(source.title, 'Título', 160, true);
+  const description = text(source.description ?? '', 'Descripción', 4000);
+  const acceptance = text(source.acceptance ?? '', 'Criterio de aceptación', 2000, true);
+  if (!Number.isInteger(source.sprint) || Number(source.sprint) < 1 || Number(source.sprint) > 8) throw new PortalError('Sprint inválido.');
+  if (!['ALTA', 'MEDIA', 'BAJA'].includes(String(source.priority))) throw new PortalError('Prioridad inválida.');
+  if (!['ENTREGABLE', 'TAREA', 'SOLICITUD'].includes(String(source.kind))) throw new PortalError('Tipo inválido.');
+  const assigneeId = source.assigneeId || null;
+  if (assigneeId !== null && !p.members.some(m => m.id === assigneeId && m.active && m.role !== 'CONSULTA')) throw new PortalError('Responsable inválido o inactivo.');
+  const dependencies = source.dependencies ?? [];
+  if (!Array.isArray(dependencies) || dependencies.length > 30 || dependencies.some(id => typeof id !== 'string' || id === current?.id || !p.tasks.some(t => t.id === id && !t.archived))) throw new PortalError('Dependencias inválidas.');
+  if (current) {
+    const reaches = (id: string, visited = new Set<string>()): boolean => {
+      if (id === current.id) return true; if (visited.has(id)) return false; visited.add(id);
+      return p.tasks.find(t => t.id === id)?.dependencies.some(dep => reaches(dep, visited)) ?? false;
+    };
+    if (dependencies.some(id => reaches(id))) throw new PortalError('La dependencia crearía un ciclo.');
+  }
+  const now = new Date().toISOString();
+  return { id: current?.id ?? randomUUID(), title, description, acceptance, sprint: Number(source.sprint), status: current?.status ?? 'PENDIENTE',
+    assigneeId: assigneeId as string | null, priority: source.priority as Task['priority'], kind: source.kind as Task['kind'],
+    dueDate: date(source.dueDate ?? null), blocked: current?.blocked ?? '', dependencies: [...new Set(dependencies)] as string[], evidence: evidenceUrl(source.evidence ?? ''),
+    archived: current?.archived ?? false, version: current?.version ?? 1, createdAt: current?.createdAt ?? now, updatedAt: now };
+}

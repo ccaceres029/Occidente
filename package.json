@@ -5,6 +5,9 @@
   "description": "Demo local de automatizacion de afiliaciones AFPC Occidente",
   "packageManager": "pnpm@11.16.0",
   "scripts": {
+    "portal:dev": "PORTAL_MODE=demo pnpm --filter @occi/server exec tsx src/projectPortal/index.ts",
+    "portal:start": "node server/dist/projectPortal/index.js",
+    "portal:test": "pnpm --filter @occi/server exec tsx --test test/projectPortal.test.ts && node --test portal/calendar.test.mjs",
     "dev": "pnpm --parallel --filter @occi/server --filter @occi/client dev",
     "build": "pnpm --filter @occi/server build && pnpm --filter @occi/client build",
     "build:site": "node scripts/build-site.mjs",
